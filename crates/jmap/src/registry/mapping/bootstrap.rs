@@ -28,9 +28,11 @@ use registry::{
             Account, AcmeProvider, BlobStore, Bootstrap, CertificateManagement,
             CertificateManagementProperties, Credential, DataStore, Directory, DirectoryBootstrap,
             DkimManagement, DkimManagementProperties, DnsManagement, DnsManagementProperties,
-            DnsServer, DnsServerBootstrap, Domain, InMemoryStore, PasswordCredential, RocksDbStore,
-            SearchStore, SystemSettings, Task, TaskDnsManagement, TaskDomainManagement, TaskStatus,
-            Tracer, TracerLog, UserAccount, UserRoles,
+            DnsServer, DnsServerBootstrap, Domain, InMemoryStore, PasswordCredential,
+            PostgreSqlStore, PublicStringOptional, S3Store, S3StoreCustomRegion, S3StoreRegion,
+            SearchStore, SecretKeyEnvironmentVariable, SecretKeyOptional, SystemSettings, Task,
+            TaskDnsManagement, TaskDomainManagement, TaskStatus, Tracer, TracerLog, UserAccount,
+            UserRoles,
         },
     },
     types::{ObjectImpl, list::List, map::Map},
@@ -280,12 +282,26 @@ pub(crate) async fn bootstrap_set(
         let mut bp_check =
             store::registry::bootstrap::Bootstrap::new_uninitialized(tmp_registry.clone())
                 .with_data_store(store.clone());
-        let _ = Storage::parse(&mut bp_check).await;
+        let storage = Storage::parse(&mut bp_check).await;
         if !bp_check.errors.is_empty() {
             set.response
                 .not_updated
                 .append(id, map_bootstrap_error(bp_check.errors));
             break 'outer;
+        }
+
+        // Constructing an S3 client does not contact the bucket. Verify that
+        // credentials can write, read and delete before persisting the setup.
+        if matches!(&bootstrap.blob_store, BlobStore::S3(_)) {
+            if let Err(err) = verify_bootstrap_blob_store(&storage.blob).await {
+                set.response.not_updated.append(
+                    id,
+                    SetError::invalid_properties()
+                        .with_property(Property::BlobStore)
+                        .with_description(err),
+                );
+                break 'outer;
+            }
         }
 
         // Create inner store
@@ -653,26 +669,97 @@ fn map_dns_server(dns_server: &DnsServerBootstrap) -> Option<registry::schema::s
     }
 }
 
-// FreeBSD keeps variable application data under /var/db (hier(7))
-// rather than FHS /var/lib.
-const DEFAULT_DATA_PATH: &str = if cfg!(target_os = "freebsd") {
-    "/var/db/stalwart/"
-} else {
-    "/var/lib/stalwart/"
-};
+async fn verify_bootstrap_blob_store(blob: &store::BlobStore) -> Result<(), String> {
+    const PROBE_DATA: &[u8] = b"Stalwart initial storage verification";
+    let key = rng().random::<[u8; 32]>();
+    let verify = tokio::time::timeout(Duration::from_secs(60), async {
+        blob.put_blob(
+            &key,
+            PROBE_DATA,
+            registry::schema::enums::CompressionAlgo::Lz4,
+        )
+        .await
+        .map_err(|err| format!("Failed to write to the blob store: {err}"))?;
+        let data = blob
+            .get_blob(&key, 0..usize::MAX)
+            .await
+            .map_err(|err| format!("Failed to read from the blob store: {err}"))?;
+        if data.as_deref() != Some(PROBE_DATA) {
+            return Err("Blob store verification returned missing or incorrect data".to_string());
+        }
+        Ok(())
+    })
+    .await;
+
+    // Also attempt cleanup after a failed or timed-out write/read.
+    let cleanup = tokio::time::timeout(Duration::from_secs(30), blob.delete_blob(&key)).await;
+    verify.map_err(|_| "Blob store write/read verification timed out".to_string())??;
+    cleanup
+        .map_err(|_| "Blob store verification cleanup timed out".to_string())?
+        .map_err(|err| format!("Failed to delete the blob store verification object: {err}"))?;
+    Ok(())
+}
+
+fn build_default_storage(env: impl Fn(&str) -> Option<String>) -> (DataStore, BlobStore) {
+    let value = |name: &str, fallback: &str| {
+        env(name)
+            .filter(|value| !value.trim().is_empty())
+            .map(|value| value.trim().to_string())
+            .unwrap_or_else(|| fallback.to_string())
+    };
+    // Invalid ports stay invalid for the normal Bootstrap validation to report.
+    let port = value("STALWART_POSTGRES_PORT", "5432")
+        .parse::<u64>()
+        .unwrap_or(0);
+    let account_id = value("STALWART_R2_ACCOUNT_ID", "");
+    let default_endpoint = if account_id.is_empty() {
+        String::new()
+    } else {
+        format!("https://{account_id}.r2.cloudflarestorage.com")
+    };
+    let endpoint = value("STALWART_R2_ENDPOINT", &default_endpoint);
+    let credential = |variable_name: &str| SecretKeyEnvironmentVariable {
+        variable_name: variable_name.to_string(),
+    };
+
+    (
+        DataStore::PostgreSql(PostgreSqlStore {
+            host: value("STALWART_POSTGRES_HOST", "localhost"),
+            port,
+            database: value("STALWART_POSTGRES_DATABASE", "stalwart"),
+            auth_username: Some(value("STALWART_POSTGRES_USER", "stalwart")),
+            auth_secret: SecretKeyOptional::EnvironmentVariable(credential(
+                "STALWART_POSTGRES_PASSWORD",
+            )),
+            ..Default::default()
+        }),
+        BlobStore::S3(S3Store {
+            region: S3StoreRegion::Custom(S3StoreCustomRegion {
+                custom_region: "auto".to_string(),
+                custom_endpoint: endpoint,
+            }),
+            bucket: value("STALWART_R2_BUCKET", ""),
+            access_key: PublicStringOptional::EnvironmentVariable(credential(
+                "STALWART_R2_ACCESS_KEY_ID",
+            )),
+            secret_key: SecretKeyOptional::EnvironmentVariable(credential(
+                "STALWART_R2_SECRET_ACCESS_KEY",
+            )),
+            ..Default::default()
+        }),
+    )
+}
 
 fn build_default_bootstrap(server: &Server) -> Bootstrap {
     let server_hostname = server.registry().local_hostname().to_string();
     let default_domain = psl::domain_str(&server_hostname)
         .unwrap_or("example.org")
         .to_string();
+    let (data_store, blob_store) = build_default_storage(|name| std::env::var(name).ok());
 
     Bootstrap {
-        data_store: DataStore::RocksDb(RocksDbStore {
-            path: DEFAULT_DATA_PATH.to_string(),
-            ..Default::default()
-        }),
-        blob_store: BlobStore::Default,
+        data_store,
+        blob_store,
         search_store: SearchStore::Default,
         in_memory_store: InMemoryStore::Default,
         directory: DirectoryBootstrap::Internal,
@@ -688,5 +775,114 @@ fn build_default_bootstrap(server: &Server) -> Bootstrap {
         request_tls_certificate: true,
         generate_dkim_keys: true,
         dns_server: DnsServerBootstrap::Manual,
+    }
+}
+
+#[cfg(test)]
+mod bootstrap_defaults_tests {
+    use super::*;
+
+    fn stores(vars: &[(&str, &str)]) -> (DataStore, BlobStore) {
+        build_default_storage(|name| {
+            vars.iter()
+                .find(|(key, _)| *key == name)
+                .map(|(_, value)| value.to_string())
+        })
+    }
+
+    #[test]
+    fn new_installations_select_postgres_and_r2() {
+        let (data, blob) = stores(&[]);
+        let DataStore::PostgreSql(data) = data else {
+            panic!("PostgreSQL must be the default data store");
+        };
+        assert_eq!(data.host, "localhost");
+        assert_eq!(data.port, 5432);
+        assert_eq!(data.database, "stalwart");
+        let BlobStore::S3(blob) = blob else {
+            panic!("R2/S3 must be the default blob store");
+        };
+        let S3StoreRegion::Custom(region) = blob.region else {
+            panic!("R2 requires a custom endpoint");
+        };
+        assert_eq!(region.custom_region, "auto");
+        assert!(region.custom_endpoint.is_empty());
+        assert!(blob.bucket.is_empty());
+        assert!(blob.verify_after_write);
+        assert!(!blob.allow_invalid_certs);
+    }
+
+    #[test]
+    fn connection_settings_can_be_prefilled_without_exposing_secrets() {
+        let (data, blob) = stores(&[
+            ("STALWART_POSTGRES_HOST", " postgres.internal "),
+            ("STALWART_POSTGRES_PORT", "6432"),
+            ("STALWART_POSTGRES_DATABASE", "mail"),
+            ("STALWART_POSTGRES_USER", "mail_user"),
+            ("STALWART_POSTGRES_PASSWORD", "must-not-be-in-defaults"),
+            ("STALWART_R2_ACCOUNT_ID", "test-account"),
+            ("STALWART_R2_BUCKET", "mail-blobs"),
+            ("STALWART_R2_SECRET_ACCESS_KEY", "must-not-be-in-defaults"),
+        ]);
+        let DataStore::PostgreSql(data) = &data else {
+            panic!("Expected PostgreSQL");
+        };
+        assert_eq!(data.host, "postgres.internal");
+        assert_eq!(data.port, 6432);
+        assert_eq!(data.database, "mail");
+        assert_eq!(data.auth_username.as_deref(), Some("mail_user"));
+        assert!(matches!(
+            &data.auth_secret,
+            SecretKeyOptional::EnvironmentVariable(var)
+                if var.variable_name == "STALWART_POSTGRES_PASSWORD"
+        ));
+        let BlobStore::S3(blob) = &blob else {
+            panic!("Expected S3");
+        };
+        assert_eq!(blob.bucket, "mail-blobs");
+        assert!(matches!(
+            &blob.region,
+            S3StoreRegion::Custom(region)
+                if region.custom_endpoint == "https://test-account.r2.cloudflarestorage.com"
+        ));
+        assert!(
+            !serde_json::to_string(&data)
+                .unwrap()
+                .contains("must-not-be-in-defaults")
+        );
+        assert!(
+            !serde_json::to_string(&blob)
+                .unwrap()
+                .contains("must-not-be-in-defaults")
+        );
+    }
+
+    #[test]
+    fn explicit_endpoint_takes_priority_and_empty_values_use_defaults() {
+        let (data, blob) = stores(&[
+            ("STALWART_POSTGRES_HOST", " "),
+            ("STALWART_R2_ACCOUNT_ID", "test-account"),
+            (
+                "STALWART_R2_ENDPOINT",
+                "https://test-account.eu.r2.cloudflarestorage.com",
+            ),
+        ]);
+        let DataStore::PostgreSql(data) = data else {
+            panic!("Expected PostgreSQL");
+        };
+        assert_eq!(data.host, "localhost");
+        assert!(matches!(
+            blob,
+            BlobStore::S3(S3Store {
+                region: S3StoreRegion::Custom(region),
+                ..
+            }) if region.custom_endpoint == "https://test-account.eu.r2.cloudflarestorage.com"
+        ));
+    }
+
+    #[test]
+    fn malformed_port_is_not_silently_replaced_with_a_valid_default() {
+        let (data, _) = stores(&[("STALWART_POSTGRES_PORT", "invalid")]);
+        assert!(matches!(data, DataStore::PostgreSql(data) if data.port == 0));
     }
 }

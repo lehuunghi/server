@@ -1,0 +1,59 @@
+name: PostgreSQL and R2 defaults
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "crates/**"
+      - "tests/**"
+      - "Cargo.*"
+      - "install.sh"
+      - "resources/scripts/test_install.py"
+      - "resources/deployment/**"
+      - ".github/workflows/postgres-r2.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: postgres-r2-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  installer:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - name: Check installer behavior
+        run: python3 resources/scripts/test_install.py
+      - name: Validate Docker Compose configuration
+        env:
+          STALWART_POSTGRES_PASSWORD: disposable-test-password
+        run: |
+          cp resources/deployment/.env.example resources/deployment/.env
+          docker compose --env-file resources/deployment/.env -f resources/deployment/compose.yaml config --quiet
+
+  storage:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      RUST_MIN_STACK: "16777216"
+      CARGO_TERM_COLOR: always
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libclang-dev
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Check default server build
+        run: cargo check -p stalwart
+      - name: Check initial storage defaults and environment overrides
+        run: cargo test -p stalwart -p jmap bootstrap_defaults_tests -- --nocapture
+      - name: Test PostgreSQL and S3 storage against disposable containers
+        env:
+          STORE: PostgreSql
+          BLOB_STORE: S3
+        run: cargo test -p tests --features "postgres s3" store:: -- --nocapture

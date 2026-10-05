@@ -1,0 +1,45 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: ${STALWART_POSTGRES_DATABASE:-stalwart}
+      POSTGRES_USER: ${STALWART_POSTGRES_USER:-stalwart}
+      POSTGRES_PASSWORD: ${STALWART_POSTGRES_PASSWORD:?Set STALWART_POSTGRES_PASSWORD in .env}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+
+  server:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    env_file: .env
+    environment:
+      STALWART_POSTGRES_HOST: postgres
+      STALWART_POSTGRES_PORT: "5432"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "8080:8080"
+      - "443:443"
+      - "25:25"
+      - "587:587"
+      - "465:465"
+      - "143:143"
+      - "993:993"
+      - "4190:4190"
+    volumes:
+      - server-config:/etc/stalwart
+      - server-data:/var/lib/stalwart
+    restart: unless-stopped
+
+volumes:
+  postgres-data:
+  server-config:
+  server-data:

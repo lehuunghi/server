@@ -133,6 +133,8 @@ Key features:
 
 ## Get Started
 
+This fork defaults to **PostgreSQL** for data/search and **Cloudflare R2** for mail blobs during initial setup. Connection fields remain editable. See [PostgreSQL + R2 installation](docs/POSTGRESQL-R2.md) for Linux source/release installation, Docker Compose, environment settings, and tests. Existing installations require an explicit migration to change storage backends.
+
 Install Stalwart on your server by following the instructions for your platform:
 
 - [Linux / MacOS / FreeBSD](https://stalw.art/docs/install/platform/linux)

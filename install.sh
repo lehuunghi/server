@@ -12,42 +12,27 @@
 set -e
 set -u
 
-readonly BASE_URL="https://github.com/stalwartlabs/stalwart/releases/latest/download"
+readonly BASE_URL="${STALWART_DOWNLOAD_BASE_URL:-https://github.com/lehuunghi/server/releases/latest/download}"
 
 main() {
-    downloader --check
-    need_cmd uname
-    need_cmd mktemp
-    need_cmd chmod
-    need_cmd chown
-    need_cmd mkdir
-    need_cmd rm
-    need_cmd tar
-    need_cmd cp
-    need_cmd hostname
-
-    # Require root
-    if [ "$(id -u)" -ne 0 ]; then
-        err "❌ Install failed: This program needs to run as root."
-    fi
-
-    # Detect OS
-    local _os _uname _account
-    _uname="$(uname)"
-    case "$_uname" in
-        Linux)   _os="linux"; _account="stalwart" ;;
-        Darwin)  _os="macos"; _account="_stalwart" ;;
-        FreeBSD) _os="freebsd"; _account="stalwart" ;;
-        *)       err "❌ Install failed: Unsupported OS: $_uname" ;;
-    esac
-
     # Parse arguments
     local _component="stalwart"
     local _prefix=""
+    local _provided_binary="" _provided_env=""
     while [ $# -gt 0 ]; do
         case "$1" in
             --fdb)
                 _component="stalwart-foundationdb"
+                ;;
+            --binary)
+                [ $# -ge 2 ] || err "❌ --binary requires a file path"
+                _provided_binary="$2"
+                shift
+                ;;
+            --env-file)
+                [ $# -ge 2 ] || err "❌ --env-file requires a file path"
+                _provided_env="$2"
+                shift
                 ;;
             -h|--help)
                 print_usage
@@ -65,6 +50,40 @@ main() {
         esac
         shift
     done
+
+    if [ -n "$_provided_binary" ]; then
+        [ -f "$_provided_binary" ] || err "❌ Binary file not found: $_provided_binary"
+    else
+        downloader --check
+        need_cmd mktemp
+        need_cmd rm
+        need_cmd tar
+    fi
+    if [ -n "$_provided_env" ]; then
+        [ -f "$_provided_env" ] || err "❌ Environment file not found: $_provided_env"
+    fi
+    need_cmd id
+    need_cmd uname
+    need_cmd chmod
+    need_cmd chown
+    need_cmd mkdir
+    need_cmd cp
+    need_cmd hostname
+
+    # Require root
+    if [ "$(id -u)" -ne 0 ]; then
+        err "❌ Install failed: This program needs to run as root."
+    fi
+
+    # Detect OS
+    local _os _uname _account
+    _uname="$(uname)"
+    case "$_uname" in
+        Linux)   _os="linux"; _account="stalwart" ;;
+        Darwin)  _os="macos"; _account="_stalwart" ;;
+        FreeBSD) _os="freebsd"; _account="stalwart" ;;
+        *)       err "❌ Install failed: Unsupported OS: $_uname" ;;
+    esac
 
     # Derive install paths — FHS by default, self-contained under a custom prefix
     local _bin_dir _bin_file _conf_dir _log_dir _data_dir _env_file _config_file
@@ -90,36 +109,24 @@ main() {
     _config_file="${_conf_dir}/config.json"
     _env_file="${_conf_dir}/stalwart.env"
 
-    # Detect architecture
-    get_architecture || return 1
-    local _arch="$RETVAL"
-    assert_nz "$_arch" "arch"
-
     # Create service account
     create_account "$_os" "$_account"
 
     # Create directories
     ensure mkdir -p "$_bin_dir" "$_conf_dir" "$_log_dir" "$_data_dir"
 
-    # Download and install the binary
-    say "⏳ Downloading ${_component} for ${_arch}..."
-    local _tmp _tar _src_name
-    _tmp="$(mktemp -d)"
-    _tar="${_tmp}/stalwart.tar.gz"
-    ensure downloader "${BASE_URL}/${_component}-${_arch}.tar.gz" "$_tar" "$_arch"
-    ensure tar zxf "$_tar" -C "$_tmp"
-    _src_name="stalwart"
-    if [ "$_component" = "stalwart-foundationdb" ]; then
-        _src_name="stalwart-foundationdb"
-    fi
-    ensure cp "${_tmp}/${_src_name}" "$_bin_file"
-    ensure chmod 0755 "$_bin_file"
-    ensure rm -rf "$_tmp"
+    install_binary "$_bin_file" "$_provided_binary" "$_component"
 
     # Create env file if absent (preserve user edits on reinstall)
     if [ ! -e "$_env_file" ]; then
         say "📝 Writing env file at ${_env_file}..."
-        write_env_file "$_env_file"
+        if [ -n "$_provided_env" ]; then
+            ensure cp "$_provided_env" "$_env_file"
+        else
+            write_env_file "$_env_file"
+        fi
+    elif [ -n "$_provided_env" ]; then
+        say "Keeping existing environment file at ${_env_file}; edit it to update connection settings."
     fi
 
     # Ownership and permissions
@@ -189,13 +196,22 @@ main() {
 
 print_usage() {
     cat <<'EOF'
-Usage: install.sh [--fdb] [PREFIX]
+Usage: install.sh [--fdb] [--binary PATH] [--env-file PATH] [PREFIX]
 
 Install Stalwart into standard FHS paths or under a custom prefix.
 
 Options:
-  --fdb       Install the FoundationDB build.
-  -h, --help  Show this help.
+  --fdb            Download the FoundationDB build.
+  --binary PATH    Install a local binary built from this repository.
+  --env-file PATH  Copy connection settings on first install; preserve an existing env file.
+  -h, --help       Show this help without installing anything.
+
+Downloads use lehuunghi/server releases by default. A release must exist first.
+Override the download directory with STALWART_DOWNLOAD_BASE_URL, or build with
+cargo build --release -p stalwart and pass --binary target/release/stalwart.
+
+New setups select PostgreSQL and Cloudflare R2. Configure the service env file
+or edit the storage fields in the initial setup UI before completing setup.
 
 With no PREFIX, Stalwart is installed under standard FHS paths:
   binary   /usr/local/bin/stalwart
@@ -213,10 +229,51 @@ When PREFIX is provided, a self-contained layout is used instead:
 EOF
 }
 
+install_binary() {
+    local _destination="$1" _provided="$2" _component="$3"
+    if [ -n "$_provided" ]; then
+        say "📦 Installing local binary from ${_provided}..."
+        ensure cp "$_provided" "$_destination"
+    else
+        get_architecture || return 1
+        local _arch="$RETVAL"
+        assert_nz "$_arch" "arch"
+        say "⏳ Downloading ${_component} for ${_arch}..."
+        local _tmp _tar
+        _tmp="$(mktemp -d)"
+        _tar="${_tmp}/stalwart.tar.gz"
+        ensure downloader "${BASE_URL}/${_component}-${_arch}.tar.gz" "$_tar" "$_arch"
+        ensure tar zxf "$_tar" -C "$_tmp"
+        ensure cp "${_tmp}/${_component}" "$_destination"
+        ensure rm -rf "$_tmp"
+    fi
+    ensure chmod 0755 "$_destination"
+}
+
 write_env_file() {
     cat > "$1" <<'EOF'
 # Environment variables for the Stalwart service.
 # Uncomment and edit an entry to override its default.
+
+# Initial setup defaults: PostgreSQL for data/search and Cloudflare R2 for blobs.
+# These prefill NEW setups only. Later changes must be made in the admin UI;
+# changing backend on an existing installation requires data migration.
+STALWART_POSTGRES_HOST=localhost
+STALWART_POSTGRES_PORT=5432
+STALWART_POSTGRES_DATABASE=stalwart
+STALWART_POSTGRES_USER=stalwart
+#STALWART_POSTGRES_PASSWORD='replace-with-database-password'
+
+# Use the account ID for the standard endpoint, or set the exact S3 endpoint.
+#STALWART_R2_ACCOUNT_ID=your-cloudflare-account-id
+#STALWART_R2_ENDPOINT=https://your-account-id.r2.cloudflarestorage.com
+#STALWART_R2_BUCKET=mail-blobs
+#STALWART_R2_ACCESS_KEY_ID=your-r2-access-key-id
+#STALWART_R2_SECRET_ACCESS_KEY='replace-with-r2-secret'
+
+# Credentials default to environment-variable references. You can also change
+# their source to a direct value or file in the setup UI. They must remain
+# available on future restarts when environment references are used.
 
 # Override the hostname used in HTTP responses
 #STALWART_HOSTNAME=mail.example.com
