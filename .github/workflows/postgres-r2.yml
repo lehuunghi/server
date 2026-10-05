@@ -56,4 +56,5 @@ jobs:
         env:
           STORE: PostgreSql
           BLOB_STORE: S3
-        run: cargo test -p tests --features "postgres s3" store:: -- --nocapture
+        run: |
+          cargo test -p tests --features "postgres s3" store:: -- --nocapture
