@@ -54,8 +54,19 @@ class AutoSetupTests(unittest.TestCase):
             result = subprocess.run(["docker", "compose", "--env-file", str(self.directory / ".env"),
                                      "-f", str(self.directory / "compose.json"), "config", "--format", "json"],
                                     check=True, capture_output=True, text=True)
-            actual = json.loads(result.stdout)["services"]["server"]["environment"]
-            self.assertEqual(actual["STALWART_R2_SECRET_ACCESS_KEY"], CONFIG["STALWART_R2_SECRET_ACCESS_KEY"])
+            self.assertIn("server", json.loads(result.stdout)["services"])
+            # `compose config` escapes $ as $$ when serializing its output;
+            # verify the value delivered to a container instead of that encoding.
+            probe = {"name": compose["name"] + "-env-test", "services": {
+                "probe": {"image": "alpine:3.22", "env_file": ".env"}
+            }}
+            probe_path = self.directory / "probe.json"
+            setup.private_write(probe_path, probe)
+            result = subprocess.run(["docker", "compose", "--env-file", str(self.directory / ".env"),
+                                     "-f", str(probe_path), "run", "--rm", "--no-deps", "-T", "probe",
+                                     "printenv", "STALWART_R2_SECRET_ACCESS_KEY"],
+                                    check=True, capture_output=True, text=True)
+            self.assertEqual(result.stdout.rstrip("\n"), CONFIG["STALWART_R2_SECRET_ACCESS_KEY"])
 
     def test_rerun_preserves_passwords_and_refuses_changed_config(self):
         self.prepare()
