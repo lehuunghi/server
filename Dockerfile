@@ -31,8 +31,8 @@ RUN export DEBIAN_FRONTEND=noninteractive && \
     rm -rf /var/lib/apt/lists/* && \
     groupadd -r -g 2000 stalwart && \
     useradd -r -u 2000 -g 2000 -s /usr/sbin/nologin -M stalwart && \
-    mkdir -p /etc/stalwart /var/lib/stalwart && \
-    chown stalwart:stalwart /etc/stalwart /var/lib/stalwart
+    mkdir -p /etc/stalwart /var/lib/stalwart /var/log/stalwart && \
+    chown stalwart:stalwart /etc/stalwart /var/lib/stalwart /var/log/stalwart
 COPY --from=builder --chmod=0755 /output/stalwart /usr/local/bin/stalwart
 RUN setcap 'cap_net_bind_service=+ep' /usr/local/bin/stalwart
 USER stalwart
