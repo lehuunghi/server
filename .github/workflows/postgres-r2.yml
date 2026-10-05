@@ -8,7 +8,8 @@ on:
       - "tests/**"
       - "Cargo.*"
       - "install.sh"
-      - "resources/scripts/test_install.py"
+      - "install-auto.sh"
+      - "resources/scripts/**"
       - "resources/deployment/**"
       - ".github/workflows/postgres-r2.yml"
   workflow_dispatch:
@@ -26,7 +27,13 @@ jobs:
     steps:
       - uses: actions/checkout@v7.0.1
       - name: Check installer behavior
-        run: python3 resources/scripts/test_install.py
+        env:
+          TEST_DOCKER_COMPOSE: "1"
+        run: |
+          python3 resources/scripts/test_install.py
+          python3 resources/scripts/test_auto_setup.py
+          sh -n install-auto.sh
+          sh install-auto.sh --help
       - name: Validate Docker Compose configuration
         env:
           STALWART_POSTGRES_PASSWORD: disposable-test-password
@@ -57,4 +64,8 @@ jobs:
           STORE: PostgreSql
           BLOB_STORE: S3
         run: |
-          cargo test -p tests --features "postgres s3" store:: -- --nocapture
+          cargo test -p tests --features "postgres s3" store:: -- --nocapture --test-threads=1
+      - name: Build server for unattended bootstrap verification
+        run: cargo build -p stalwart
+      - name: Verify unattended setup against the running server
+        run: sudo -E python3 resources/scripts/test_auto_setup_live.py --binary "$PWD/target/debug/stalwart"

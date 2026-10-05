@@ -4,6 +4,62 @@ Bản fork này chọn PostgreSQL cho dữ liệu và tìm kiếm, Cloudflare R2
 
 Các mặc định này không tự chuyển dữ liệu của hệ thống đã cài. Thay đổi backend của hệ thống đang có dữ liệu cần quy trình di chuyển dữ liệu.
 
+## Một lệnh cài đặt tự động, có sẵn domain và thông tin quản trị/API
+
+`install-auto.sh` dành cho VPS **Ubuntu/Debian amd64 hoặc arm64 mới**. Script tự cài dependency còn thiếu, build binary của fork trong Docker, tạo PostgreSQL với database/user/password, kiểm tra kết nối R2, đặt domain/hostname, tạo DKIM và quản trị viên, hoàn tất Bootstrap qua JMAP, rồi khởi động lại và kiểm tra đăng nhập/API. Không cần hoàn tất wizard trong trình duyệt hoặc tự cài Rust/PostgreSQL.
+
+Lưu bản mẫu sau thành `/root/stalwart.json`, điền domain và S3 credentials của bucket R2 đã tạo. Đây là các thông tin riêng của bạn nên không đưa file đã điền vào GitHub. Domain/keys trong repository chỉ là mẫu.
+
+```json
+{
+  "STALWART_DOMAIN": "example.com",
+  "STALWART_HOSTNAME": "mail.example.com",
+  "STALWART_R2_ACCOUNT_ID": "YOUR_CLOUDFLARE_ACCOUNT_ID",
+  "STALWART_R2_BUCKET": "YOUR_R2_BUCKET",
+  "STALWART_R2_ACCESS_KEY_ID": "YOUR_R2_ACCESS_KEY_ID",
+  "STALWART_R2_SECRET_ACCESS_KEY": "YOUR_R2_SECRET_ACCESS_KEY",
+  "STALWART_REQUEST_TLS_CERTIFICATE": true
+}
+```
+
+Chạy lệnh sau trên VPS, từ tài khoản có quyền sudo:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/lehuunghi/server/main/install-auto.sh -o /tmp/stalwart-install-auto.sh && sudo sh /tmp/stalwart-install-auto.sh --config /root/stalwart.json
+```
+
+Nếu máy chưa có `curl`, dùng `wget -O /tmp/stalwart-install-auto.sh https://raw.githubusercontent.com/lehuunghi/server/main/install-auto.sh` rồi chạy phần `sudo sh ...` phía trên. Script tự cài các dependency còn lại. Từ checkout có sẵn: `sudo sh install-auto.sh --config /root/stalwart.json --source "$PWD"`.
+
+Sau khi xong, script hiển thị:
+
+| Thông tin | Ví dụ |
+|---|---|
+| Domain | `example.com` |
+| Trang quản trị | `https://mail.example.com/admin` |
+| Quản trị viên | `admin@example.com` |
+| Mật khẩu | Sinh ngẫu nhiên và xác minh đăng nhập sau restart |
+| JMAP session | `https://mail.example.com/jmap/session` |
+| JMAP API | `https://mail.example.com/jmap/` |
+| OAuth token endpoint | `https://mail.example.com/auth/token` |
+| Xác thực API | HTTP Basic với tài khoản/mật khẩu quản trị, qua HTTPS |
+
+Thông tin này được lưu vào `/opt/stalwart/credentials.json` với quyền `0600`; có thể xem lại bằng `sudo cat /opt/stalwart/credentials.json`. File `.env` và trạng thái cài đặt cũng có quyền `0600`. Mật khẩu bootstrap tạm được xóa khỏi môi trường trước khi tạo lại container. Không có bearer token được sinh sẵn; endpoint OAuth được cung cấp để ứng dụng thực hiện luồng cấp token phù hợp.
+
+Chạy lại cùng lệnh và cùng JSON sẽ giữ nguyên mật khẩu/database và kiểm tra lại dịch vụ. Nếu JSON thay đổi, script dừng để tránh vô tình đổi password của PostgreSQL đang có dữ liệu. Muốn tùy chỉnh một hệ thống đã chạy, dùng trang quản trị; khi đổi credential môi trường, cập nhật `/opt/stalwart/.env` và trạng thái môi trường tương ứng trong `/opt/stalwart/deployment.json` trước khi chạy lại installer. Không xóa volume để cài lại hệ thống đang có dữ liệu.
+
+Các tùy chọn:
+
+- `--prefix /opt/stalwart`: chọn thư mục chứa cấu hình, source và credentials; mỗi prefix có tên Compose project riêng.
+- `--source /path/to/server`: dùng checkout có sẵn, tránh clone lại.
+- `--ref main`: chọn branch hoặc tag khi clone lần đầu; cài lại dùng source đã lưu.
+- Bỏ `STALWART_HOSTNAME` để tự dùng `mail.<domain>`.
+- Thay account ID bằng `STALWART_R2_ENDPOINT` khi cần endpoint jurisdiction riêng.
+- PostgreSQL mặc định tự tạo nội bộ. Có thể điền thêm `STALWART_POSTGRES_HOST`, `STALWART_POSTGRES_PORT`, `STALWART_POSTGRES_DATABASE`, `STALWART_POSTGRES_USER`, `STALWART_POSTGRES_PASSWORD` để dùng một database trống có sẵn. Kết nối từ container dùng hostname/IP truy cập được, không dùng `localhost` của VPS.
+
+**DNS vẫn cần thuộc quyền quản lý của bạn:** trỏ bản ghi A/AAAA của hostname về VPS, đặt MX cho domain và các bản ghi mail theo trang quản trị. Script không tự thay DNS Cloudflare vì R2 S3 credentials không có quyền DNS. ACME cần DNS đúng và cổng HTTPS 443 truy cập được; chứng chỉ hợp lệ có thể được cấp sau khi hoàn tất cài đặt. Cổng bootstrap 8080 chỉ công bố trên loopback; quản trị từ xa dùng HTTPS 443. Script kiểm tra dịch vụ HTTPS tại loopback với chứng chỉ khởi tạo, không coi việc đó là xác minh chứng chỉ công khai.
+
+Lần build đầu có thể mất nhiều phút và cần đủ RAM/dung lượng cho Rust/RocksDB; script không phụ thuộc việc fork đã có release. PostgreSQL và cấu hình server nằm trong Docker volumes, có restart policy `unless-stopped`. Các cổng 25/443/465/587/143/993/4190 cần chưa bị dịch vụ khác chiếm.
+
 ## Thông tin cần chuẩn bị
 
 Tạo một database PostgreSQL và user có quyền tạo bảng trong database đó. Tạo một bucket R2 và credentials S3 có quyền Object Read & Write.
@@ -86,11 +142,12 @@ Có thể thay nguồn tải bằng `STALWART_DOWNLOAD_BASE_URL`. Nguồn tải 
 
 ```sh
 python3 resources/scripts/test_install.py
+python3 resources/scripts/test_auto_setup.py
 cargo check -p stalwart
 cargo test -p stalwart -p jmap bootstrap_defaults_tests -- --nocapture
-STORE=PostgreSql BLOB_STORE=S3 cargo test -p tests --features "postgres s3" store:: -- --nocapture
+STORE=PostgreSql BLOB_STORE=S3 cargo test -p tests --features "postgres s3" store:: -- --nocapture --test-threads=1
 ```
 
-Workflow `PostgreSQL and R2 defaults` chạy các kiểm tra này khi push lên main. Integration tests dùng PostgreSQL và MinIO trong container dùng riêng; không dùng bucket R2 thật. Cần kiểm tra thêm gửi/đọc thư có tệp đính kèm và khởi động lại server với PostgreSQL/R2 thực tế trước khi đưa hệ thống vào sử dụng.
+Workflow `PostgreSQL and R2 defaults` chạy các kiểm tra này khi push lên main, kiểm tra parser Compose cho cấu hình sinh tự động, và kiểm tra bootstrap/restart/đăng nhập/API với binary server thật. Integration tests dùng PostgreSQL và MinIO trong container dùng riêng; MinIO được build từ một commit upstream cố định, không dùng image Docker Hub `latest` đã ngừng phân phối. Chạy store tests tuần tự để tránh hai test tạo cùng bảng PostgreSQL. Không dùng bucket R2 thật. Cần kiểm tra thêm gửi/đọc thư có tệp đính kèm và khởi động lại server với PostgreSQL/R2 thực tế trước khi đưa hệ thống vào sử dụng.
 
 Ở phiên bản này, `config.json` local chứa DataStore, còn blob/search nằm trong registry. Không chép toàn bộ Bootstrap hoặc cấu hình TOML của bản cũ vào file này.

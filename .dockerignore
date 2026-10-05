@@ -8,3 +8,11 @@
 
 !Cargo.lock
 !Cargo.toml
+
+# Never copy local deployment credentials into build layers.
+**/.env
+**/*.env
+**/credentials.json
+**/deployment.json
+**/stalwart.json
+**/auto-config.json

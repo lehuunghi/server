@@ -220,7 +220,14 @@ pub async fn ensure_nats() {
 pub async fn ensure_minio() {
     MINIO
         .get_or_init(|| async {
-            GenericImage::new("minio/minio", "latest")
+            // The community image is no longer published on Docker Hub. Build
+            // the disposable test service from a fixed upstream source commit.
+            let image = GenericBuildableImage::new("stalwart-test-minio", "source")
+                .with_dockerfile_string(include_str!("../../docker/minio/Dockerfile"))
+                .build_image()
+                .await
+                .expect("Failed to build MinIO test image");
+            image
                 .with_env_var("MINIO_ROOT_USER", "minioadmin")
                 .with_env_var("MINIO_ROOT_PASSWORD", "minioadmin")
                 .with_cmd(["server", "/data", "--console-address", ":9001"])
