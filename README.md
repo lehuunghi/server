@@ -28,6 +28,12 @@
   <a href="https://www.reddit.com/r/stalwartlabs/"><img src="https://img.shields.io/reddit/subreddit-subscribers/stalwartlabs?label=%2Fr%2Fstalwartlabs&logo=reddit&style=flat-square" alt="Reddit"></a>
 </p>
 
+## Container tự động trên GHCR
+
+Workflow tự build khi cập nhật `main` hoặc tạo tag `v*`, rồi đẩy image
+`ghcr.io/lehuunghi/server` cho AMD64 và ARM64. Xem [hướng dẫn GHCR](docs/GHCR.md).
+
+
 ## Features
 
 **Stalwart** is an open-source mail & collaboration server with JMAP, IMAP4, POP3, SMTP, CalDAV, CardDAV and WebDAV support and a wide range of modern features. It is written in Rust and designed to be secure, fast, robust and scalable.

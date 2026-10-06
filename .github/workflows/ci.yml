@@ -11,8 +11,8 @@ on:
         required: false
         default: false
         type: boolean
-  push:
-    tags: ["v*.*.*"]
+# The fork publishes containers on push through ghcr.yml.
+# Keep this inherited binary-release pipeline available for manual runs.
 
 env:
   SCCACHE_GHA_ENABLED: true
