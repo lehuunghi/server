@@ -86,7 +86,7 @@ def exercise(binary, with_relay):
                     assert strategy["route"]["match"][0]["then"] == "'local'"
                     tls = client.call("x:MtaTlsStrategy/get", arguments)["list"]
                     tls = next(value for value in tls if value["name"] == "installation-relay-tls")
-                    assert tls["startTls"] == "Require"
+                    assert tls["startTls"] == "require"
                 tracer = client.call("x:Tracer/get", arguments)["list"][0]
                 assert tracer["@type"] == "Stdout"
                 # Reruns preserve credentials and the remote startup descriptor.
