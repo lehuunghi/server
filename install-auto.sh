@@ -8,8 +8,9 @@ usage() {
 Usage: sh install-auto.sh --config /root/stalwart.json [--prefix /opt/stalwart]
        sh install-auto.sh --config FILE --source /path/to/server
 
-Installs missing dependencies, builds this fork, starts PostgreSQL and Stalwart,
-sets the domain, completes bootstrap, and prints administrator/API details.
+Installs missing dependencies, builds this fork, starts Stalwart using the
+configured PostgreSQL connection, sets the domain, completes bootstrap,
+and prints administrator/API details. An external host reuses your existing DB.
 The JSON config and generated credentials stay on this machine.
 Options: --ref REF (default: main), --source PATH, --prefix PATH, --help
 EOF
@@ -40,7 +41,8 @@ main() {
     case "$prefix" in /*) ;; *) fail '--prefix must be an absolute path.' ;; esac
     umask 077
 
-    # Install only missing host dependencies. PostgreSQL/Rust run inside Docker.
+    # Install only missing host dependencies. The server is built inside Docker;
+    # an external PostgreSQL host is reused without installing PostgreSQL.
     missing=
     for pair in 'python3:python3' 'git:git' 'curl:curl' 'flock:util-linux'; do
         cmd=${pair%%:*}; package=${pair#*:}

@@ -6,14 +6,19 @@ Các mặc định này không tự chuyển dữ liệu của hệ thống đã
 
 ## Một lệnh cài đặt tự động, có sẵn domain và thông tin quản trị/API
 
-`install-auto.sh` dành cho VPS **Ubuntu/Debian amd64 hoặc arm64 mới**. Script tự cài dependency còn thiếu, build binary của fork trong Docker, tạo PostgreSQL với database/user/password, kiểm tra kết nối R2, đặt domain/hostname, tạo DKIM và quản trị viên, hoàn tất Bootstrap qua JMAP, rồi khởi động lại và kiểm tra đăng nhập/API. Không cần hoàn tất wizard trong trình duyệt hoặc tự cài Rust/PostgreSQL.
+`install-auto.sh` dành cho VPS **Ubuntu/Debian amd64 hoặc arm64 mới**. Script tự cài dependency còn thiếu, build binary của fork trong Docker, kết nối PostgreSQL ngoài bằng thông tin điền sẵn, kiểm tra kết nối R2, đặt domain/hostname, tạo DKIM và quản trị viên, hoàn tất Bootstrap qua JMAP, rồi khởi động lại và kiểm tra đăng nhập/API. Không cần hoàn tất wizard trong trình duyệt hoặc cài thêm PostgreSQL trên VPS chạy mail.
 
-Lưu bản mẫu sau thành `/root/stalwart.json`, điền domain và S3 credentials của bucket R2 đã tạo. Đây là các thông tin riêng của bạn nên không đưa file đã điền vào GitHub. Domain/keys trong repository chỉ là mẫu.
+Lưu bản mẫu sau thành `/root/stalwart.json`, điền domain, host/IP, port, database, user, password của PostgreSQL ngoài và S3 credentials của bucket R2 đã tạo. Đây là các thông tin riêng của bạn nên không đưa file đã điền vào GitHub. Domain/keys trong repository chỉ là mẫu.
 
 ```json
 {
   "STALWART_DOMAIN": "example.com",
   "STALWART_HOSTNAME": "mail.example.com",
+  "STALWART_POSTGRES_HOST": "YOUR_POSTGRES_HOST",
+  "STALWART_POSTGRES_PORT": "5432",
+  "STALWART_POSTGRES_DATABASE": "stalwart",
+  "STALWART_POSTGRES_USER": "stalwart",
+  "STALWART_POSTGRES_PASSWORD": "YOUR_POSTGRES_PASSWORD",
   "STALWART_R2_ACCOUNT_ID": "YOUR_CLOUDFLARE_ACCOUNT_ID",
   "STALWART_R2_BUCKET": "YOUR_R2_BUCKET",
   "STALWART_R2_ACCESS_KEY_ID": "YOUR_R2_ACCESS_KEY_ID",
@@ -21,6 +26,8 @@ Lưu bản mẫu sau thành `/root/stalwart.json`, điền domain và S3 credent
   "STALWART_REQUEST_TLS_CERTIFICATE": true
 }
 ```
+
+Với `STALWART_POSTGRES_HOST` là host/IP của server PostgreSQL ngoài, installer chỉ tạo container server mail: không tạo container PostgreSQL, không tạo volume `postgres-data` và không cài PostgreSQL trên VPS. Database phải có sẵn, còn trống và user phải có quyền tạo bảng. Điền host/IP truy cập được **từ container mail**; không dùng `localhost` hoặc `127.0.0.1` để chỉ server PostgreSQL ngoài.
 
 Chạy lệnh sau trên VPS, từ tài khoản có quyền sudo:
 
@@ -54,11 +61,11 @@ Các tùy chọn:
 - `--ref main`: chọn branch hoặc tag khi clone lần đầu; cài lại dùng source đã lưu.
 - Bỏ `STALWART_HOSTNAME` để tự dùng `mail.<domain>`.
 - Thay account ID bằng `STALWART_R2_ENDPOINT` khi cần endpoint jurisdiction riêng.
-- PostgreSQL mặc định tự tạo nội bộ. Có thể điền thêm `STALWART_POSTGRES_HOST`, `STALWART_POSTGRES_PORT`, `STALWART_POSTGRES_DATABASE`, `STALWART_POSTGRES_USER`, `STALWART_POSTGRES_PASSWORD` để dùng một database trống có sẵn. Kết nối từ container dùng hostname/IP truy cập được, không dùng `localhost` của VPS.
+- File mẫu có sẵn năm trường PostgreSQL để dùng database ngoài. Điền `STALWART_POSTGRES_HOST`, `STALWART_POSTGRES_PORT`, `STALWART_POSTGRES_DATABASE`, `STALWART_POSTGRES_USER`, `STALWART_POSTGRES_PASSWORD` trước khi cài. Chỉ chế độ nội bộ được chọn rõ bằng host `postgres` (hoặc cấu hình cũ bỏ host) mới tạo thêm container PostgreSQL.
 
 **DNS vẫn cần thuộc quyền quản lý của bạn:** trỏ bản ghi A/AAAA của hostname về VPS, đặt MX cho domain và các bản ghi mail theo trang quản trị. Script không tự thay DNS Cloudflare vì R2 S3 credentials không có quyền DNS. ACME cần DNS đúng và cổng HTTPS 443 truy cập được; chứng chỉ hợp lệ có thể được cấp sau khi hoàn tất cài đặt. Cổng bootstrap 8080 chỉ công bố trên loopback; quản trị từ xa dùng HTTPS 443. Script kiểm tra dịch vụ HTTPS tại loopback với chứng chỉ khởi tạo, không coi việc đó là xác minh chứng chỉ công khai.
 
-Lần build đầu có thể mất nhiều phút và cần đủ RAM/dung lượng cho Rust/RocksDB; script không phụ thuộc việc fork đã có release. PostgreSQL và cấu hình server nằm trong Docker volumes, có restart policy `unless-stopped`. Các cổng 25/443/465/587/143/993/4190 cần chưa bị dịch vụ khác chiếm.
+Lần build đầu có thể mất nhiều phút và cần đủ RAM/dung lượng cho Rust/RocksDB; script không phụ thuộc việc fork đã có release. PostgreSQL ngoài giữ dữ liệu trên server database của bạn; cấu hình và dữ liệu local của server mail nằm trong Docker volumes, có restart policy `unless-stopped`. Các cổng 25/443/465/587/143/993/4190 cần chưa bị dịch vụ khác chiếm.
 
 ## Thông tin cần chuẩn bị
 
@@ -85,7 +92,9 @@ Có thể sửa host, port, database, TLS, pool, bucket, endpoint hoặc chuyể
 
 Trước khi hoàn tất thiết lập với S3/R2, server ghi một object thử có khóa ngẫu nhiên, đọc và so sánh dữ liệu, rồi xóa object. Lỗi được trả về ở trường blob store, và cấu hình local chưa được ghi. Phép thử có giới hạn thời gian và cũng thử xóa object sau lỗi ghi/đọc.
 
-## Docker Compose
+## Docker Compose với PostgreSQL nội bộ
+
+Compose tĩnh dưới đây có kèm container PostgreSQL. Để dùng PostgreSQL ngoài, dùng lệnh `install-auto.sh --config /root/stalwart.json` phía trên; Compose do installer sinh ra chỉ có server mail.
 
 Từ thư mục gốc repository:
 

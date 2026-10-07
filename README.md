@@ -141,13 +141,13 @@ Key features:
 
 This fork defaults to **PostgreSQL** for data/search and **Cloudflare R2** for mail blobs during initial setup. Connection fields remain editable. See [PostgreSQL + R2 installation](docs/POSTGRESQL-R2.md) for Linux source/release installation, Docker Compose, environment settings, and tests. Existing installations require an explicit migration to change storage backends.
 
-For an unattended installation on a new Debian/Ubuntu VPS, fill in the domain and R2 keys from [auto-config.example.json](resources/deployment/auto-config.example.json), save it locally as `/root/stalwart.json`, then run:
+For an unattended installation on a new Debian/Ubuntu VPS, fill in the domain, external PostgreSQL connection and R2 keys from [auto-config.example.json](resources/deployment/auto-config.example.json), save it locally as `/root/stalwart.json`, then run:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/lehuunghi/server/main/install-auto.sh -o /tmp/stalwart-install-auto.sh && sudo sh /tmp/stalwart-install-auto.sh --config /root/stalwart.json
 ```
 
-The script installs missing dependencies, builds this fork, provisions PostgreSQL, completes bootstrap, and verifies the administrator login after restart. It prints the admin credentials and JMAP/API URLs and saves them to `/opt/stalwart/credentials.json` with mode `0600`. See the installation guide for DNS/TLS requirements and configuration options.
+The script installs missing dependencies, builds this fork, connects to the preconfigured external PostgreSQL database, completes bootstrap, and verifies the administrator login after restart. It prints the admin credentials and JMAP/API URLs and saves them to `/opt/stalwart/credentials.json` with mode `0600`. With an external PostgreSQL host, it does not install PostgreSQL or create a database container; provide an existing empty database and a user allowed to create tables. See the installation guide for DNS/TLS requirements and configuration options.
 
 Install Stalwart on your server by following the instructions for your platform:
 
