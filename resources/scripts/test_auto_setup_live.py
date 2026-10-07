@@ -86,7 +86,8 @@ def exercise(binary, with_relay):
                     assert relay["address"] == "127.0.0.1" and relay["port"] == 2526
                     assert not relay["allowInvalidCerts"] and not relay["implicitTls"]
                     assert strategy["route"]["else"] == "'installation-relay'"
-                    assert strategy["route"]["match"][0]["then"] == "'local'"
+                    assert strategy["route"]["match"]["0"]["then"] == "'local'"
+                    assert strategy["route"]["match"]["0"]["if"] == "is_local_domain(rcpt_domain)"
                     tls = client.call("x:MtaTlsStrategy/get", arguments)["list"]
                     tls = next(value for value in tls if value["name"] == "installation-relay-tls")
                     assert tls["startTls"] == "require"
