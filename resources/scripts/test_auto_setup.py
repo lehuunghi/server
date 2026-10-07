@@ -158,112 +158,22 @@ class AutoSetupTests(unittest.TestCase):
         self.assertNotIn("STALWART_SMTP_RELAY_HOST", setup.normalize(CONFIG))
         env = setup.normalize(dict(CONFIG, STALWART_SMTP_RELAY_HOST="smtp.example.test",
                                    STALWART_SMTP_RELAY_USER="sender",
-                                   STALWART_SMTP_RELAY_PASSWORD="relay-
-        self.prepare()
-        state = setup.read_json(self.directory / "deployment.json")
-        calls = []
-        bootstrapped = False
-
-        class Handler(BaseHTTPRequestHandler):
-            def log_message(self, *args):
-                pass
-
-            def respond(self, value):
-                self.send_response(200)
-                self.send_header("Content-Type", "application/json")
-                self.end_headers()
-                self.wfile.write(json.dumps(value).encode())
-
-            def do_GET(self):
-                expected = "setup:" + state["setup_password"] if not bootstrapped else "admin@example.test:generated-password"
-                expected = "Basic " + setup.base64.b64encode(expected.encode()).decode()
-                if self.headers.get("Authorization") != expected:
-                    self.send_error(401)
-                    return
-                self.respond({"accounts": {"account": {}}, "primaryAccounts": {"urn:stalwart:jmap": "account"},
-                              "apiUrl": "https://mail.example.test/jmap/"})
-
-            def do_POST(self):
-                nonlocal bootstrapped
-                body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
-                calls.append(body)
-                method, args, call_id = body["methodCalls"][0]
-                if method == "x:Bootstrap/get":
-                    result = {"list": [] if bootstrapped else [{"id": "singleton"}]}
-                else:
-                    bootstrapped = True
-                    result = {"updated": {"singleton": {"username": "admin@example.test", "secret": "generated-password"}}}
-                self.respond({"methodResponses": [[method, result, call_id]]})
-
-        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-        thread = threading.Thread(target=server.serve_forever, daemon=True)
-        thread.start()
-        self.addCleanup(server.server_close)
-        self.addCleanup(server.shutdown)
-        url = f"http://127.0.0.1:{server.server_port}"
-        real_write = setup.private_write
-
-        def checked_write(path, value):
-            if Path(path).name == ".env" and "STALWART_RECOVERY_ADMIN" not in value:
-                self.assertTrue((self.directory / "credentials.json").exists())
-            real_write(path, value)
-
-        with patch.object(setup, "private_write", side_effect=checked_write):
-            setup.bootstrap(self.directory, url)
-        credentials = setup.read_json(self.directory / "credentials.json")
-        self.assertEqual(credentials["status"], "bootstrapped")
-        self.assertNotIn("STALWART_RECOVERY_ADMIN", (self.directory / ".env").read_text())
-        self.assertNotIn("setup_password", setup.read_json(self.directory / "deployment.json"))
-        self.assertEqual(calls[1]["methodCalls"][0][1]["update"]["singleton"]["defaultDomain"], "example.test")
-        setup.verify(self.directory, url)
-        count = len(calls)
-        self.prepare()
-        setup.bootstrap(self.directory, url)
-        self.assertEqual(len(calls), count, "A completed deployment must not be bootstrapped twice")
-        self.assertEqual(setup.read_json(self.directory / "credentials.json")["status"], "ready")
-
-    def test_bootstrap_error_keeps_recovery_login_for_retry(self):
-        self.prepare()
-        with patch.object(setup.Client, "session", return_value={"accounts": {"a": {}}}), \
-             patch.object(setup.Client, "call", side_effect=[{"list": [{"id": "singleton"}]}, {"notUpdated": {"singleton": {"type": "invalidProperties"}}}]):
-            with self.assertRaises(setup.SetupError):
-                setup.bootstrap(self.directory)
-        self.assertFalse((self.directory / "credentials.json").exists())
-        self.assertIn("STALWART_RECOVERY_ADMIN", (self.directory / ".env").read_text())
-
-    def test_credentials_are_never_sent_to_external_or_redirect_urls(self):
-        with self.assertRaises(setup.SetupError):
-            setup.Client("https://external.example.test", "admin", "secret")
-        with self.assertRaises(setup.SetupError):
-            setup.NoRedirect().redirect_request(None, None, 302, "redirect", {}, "https://external.example.test")
-
-    def test_shell_help_and_missing_args_do_not_install_packages(self):
-        result = subprocess.run(["sh", str(REPO / "install-auto.sh"), "--help"], capture_output=True, text=True)
-        self.assertEqual(result.returncode, 0)
-        self.assertIn("--config", result.stdout)
-        result = subprocess.run(["sh", str(REPO / "install-auto.sh"), "--config"], capture_output=True, text=True)
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("requires a value", result.stderr)
-
-
-if __name__ == "__main__":
-    unittest.main()
-\\#"))
+                                   STALWART_SMTP_RELAY_PASSWORD="relay-$'\\#"))
         self.assertEqual(env["STALWART_SMTP_RELAY_PORT"], "587")
         self.assertEqual(env["STALWART_SMTP_RELAY_TLS"], "starttls")
         implicit = setup.normalize(dict(CONFIG, STALWART_SMTP_RELAY_HOST="smtp.example.test",
                                         STALWART_SMTP_RELAY_TLS="implicit"))
         self.assertEqual(implicit["STALWART_SMTP_RELAY_PORT"], "465")
-        for fields in [
+        for extra in [
             {"STALWART_SMTP_RELAY_HOST": "smtp.example.test", "STALWART_SMTP_RELAY_PORT": "0"},
             {"STALWART_SMTP_RELAY_HOST": "smtp.example.test", "STALWART_SMTP_RELAY_TLS": "none"},
-            {"STALWART_SMTP_RELAY_USER": "sender"},
             {"STALWART_SMTP_RELAY_HOST": "smtp.example.test", "STALWART_SMTP_RELAY_USER": "sender"},
+            {"STALWART_SMTP_RELAY_PASSWORD": "secret"},
             {"STALWART_STATELESS": "true"},
-            {"STALWART_POSTGRES_TLS": "true"},
+            {"STALWART_POSTGRES_TLS": "false"},
         ]:
             with self.assertRaises(setup.SetupError):
-                setup.normalize(dict(CONFIG, **fields))
+                setup.normalize(dict(CONFIG, **extra))
 
     def test_bootstrap_protocol_saves_credentials_before_removing_recovery(self):
         self.prepare()
