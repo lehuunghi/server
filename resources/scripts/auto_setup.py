@@ -26,7 +26,9 @@ ENV_KEYS = {
     "STALWART_POSTGRES_HOST", "STALWART_POSTGRES_PORT", "STALWART_POSTGRES_DATABASE",
     "STALWART_POSTGRES_USER", "STALWART_POSTGRES_PASSWORD", "STALWART_R2_ACCOUNT_ID",
     "STALWART_R2_ENDPOINT", "STALWART_R2_BUCKET", "STALWART_R2_ACCESS_KEY_ID",
-    "STALWART_R2_SECRET_ACCESS_KEY",
+    "STALWART_R2_SECRET_ACCESS_KEY", "STALWART_STATELESS", "STALWART_POSTGRES_TLS",
+    "STALWART_SMTP_RELAY_HOST", "STALWART_SMTP_RELAY_PORT", "STALWART_SMTP_RELAY_USER",
+    "STALWART_SMTP_RELAY_PASSWORD", "STALWART_SMTP_RELAY_TLS",
 }
 
 
@@ -71,12 +73,15 @@ def normalize(config):
     if not isinstance(config, dict) or set(config) - ENV_KEYS:
         raise SetupError("Configuration must be a JSON object containing only documented STALWART_* keys.")
     for key, value in config.items():
-        if key == "STALWART_REQUEST_TLS_CERTIFICATE":
+        if key in {"STALWART_REQUEST_TLS_CERTIFICATE", "STALWART_STATELESS", "STALWART_POSTGRES_TLS"}:
             if not isinstance(value, bool):
                 raise SetupError(f"{key} must be true or false.")
         elif not isinstance(value, str) or any(ord(ch) < 32 for ch in value):
             raise SetupError(f"{key} must be a string without control characters.")
     env = {key: value for key, value in config.items() if isinstance(value, str)}
+    for key in ["STALWART_STATELESS", "STALWART_POSTGRES_TLS"]:
+        if key in config:
+            env[key] = str(config[key]).lower()
     env["STALWART_DOMAIN"] = valid_domain(env.get("STALWART_DOMAIN", ""), "STALWART_DOMAIN")
     env["STALWART_HOSTNAME"] = valid_domain(
         env.get("STALWART_HOSTNAME") or "mail." + env["STALWART_DOMAIN"], "STALWART_HOSTNAME"
@@ -100,21 +105,67 @@ def normalize(config):
     if not env["STALWART_POSTGRES_PORT"].isdigit() or not 1 <= int(env["STALWART_POSTGRES_PORT"]) <= 65535:
         raise SetupError("STALWART_POSTGRES_PORT must be between 1 and 65535.")
     for key in ["STALWART_POSTGRES_HOST", "STALWART_POSTGRES_DATABASE", "STALWART_POSTGRES_USER"]:
-        if not env[key].strip():
+        env[key] = env[key].strip()
+        if not env[key]:
             raise SetupError(f"{key} cannot be empty.")
+    if env.get("STALWART_STATELESS") == "true" and env["STALWART_POSTGRES_HOST"] == "postgres":
+        raise SetupError("Stateless mode requires an external PostgreSQL host.")
     if env["STALWART_POSTGRES_HOST"] == "postgres":
         if env["STALWART_POSTGRES_PORT"] != "5432":
             raise SetupError("Managed PostgreSQL uses port 5432 inside Docker.")
         env["STALWART_POSTGRES_PASSWORD"] = env.get("STALWART_POSTGRES_PASSWORD") or secrets.token_hex(24)
     elif not env.get("STALWART_POSTGRES_PASSWORD"):
         raise SetupError("External PostgreSQL requires STALWART_POSTGRES_PASSWORD and an existing empty database.")
+    normalize_relay(env)
+    return env
+
+
+def normalize_relay(env):
+    host = env.get("STALWART_SMTP_RELAY_HOST", "").strip()
+    user = env.get("STALWART_SMTP_RELAY_USER", "").strip()
+    password = env.get("STALWART_SMTP_RELAY_PASSWORD", "")
+    if not host:
+        if user or password:
+            raise SetupError("SMTP relay credentials require STALWART_SMTP_RELAY_HOST.")
+        return
+    try:
+        ipaddress.ip_address(host)
+    except ValueError:
+        if len(host) > 253 or any(
+            not re.fullmatch(r"[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?", label)
+            for label in host.split(".")
+        ):
+            raise SetupError("STALWART_SMTP_RELAY_HOST must be a hostname or IP address.")
+    mode = env.get("STALWART_SMTP_RELAY_TLS", "").strip().lower() or "starttls"
+    if mode not in {"starttls", "implicit"}:
+        raise SetupError("STALWART_SMTP_RELAY_TLS must be starttls or implicit.")
+    port = env.get("STALWART_SMTP_RELAY_PORT", "").strip() or ("465" if mode == "implicit" else "587")
+    if not port.isdigit() or not 1 <= int(port) <= 65535:
+        raise SetupError("STALWART_SMTP_RELAY_PORT must be between 1 and 65535.")
+    if bool(user) != bool(password):
+        raise SetupError("Fill in both SMTP relay user and password, or leave both empty.")
+    env.update(STALWART_SMTP_RELAY_HOST=host, STALWART_SMTP_RELAY_PORT=port,
+               STALWART_SMTP_RELAY_TLS=mode, STALWART_SMTP_RELAY_USER=user)
+
+
+def runtime_environment(state, configured):
+    env = dict(state["environment"])
+    if state.get("stateless") and configured:
+        # This connection descriptor contains a password reference, not a password.
+        env["STALWART_DATA_STORE"] = json.dumps({
+            "@type": "PostgreSql", "host": env["STALWART_POSTGRES_HOST"],
+            "port": int(env["STALWART_POSTGRES_PORT"]), "database": env["STALWART_POSTGRES_DATABASE"],
+            "authUsername": env["STALWART_POSTGRES_USER"],
+            "authSecret": {"@type": "EnvironmentVariable", "variableName": "STALWART_POSTGRES_PASSWORD"},
+            "useTls": env.get("STALWART_POSTGRES_TLS") == "true", "allowInvalidCerts": False,
+        }, separators=(",", ":"))
+    if not configured:
+        env["STALWART_RECOVERY_ADMIN"] = "setup:" + state["setup_password"]
     return env
 
 
 def write_env(directory, state):
-    env = dict(state["environment"])
-    if not (directory / "credentials.json").exists():
-        env["STALWART_RECOVERY_ADMIN"] = "setup:" + state["setup_password"]
+    env = runtime_environment(state, (directory / "credentials.json").exists())
     # Compose dotenv single quotes keep literal $, spaces, # and backslashes.
     private_write(directory / ".env", "".join(
         f"{key}='" + value.replace("'", "\\'") + "'\n" for key, value in sorted(env.items())
@@ -130,6 +181,17 @@ def compose_config(env, source, project_name="stalwart-auto"):
         "restart": "unless-stopped",
     }
     volumes = {"server-config": {}, "server-data": {}}
+    if env.get("STALWART_STATELESS") == "true":
+        server.pop("volumes")
+        server["read_only"] = True
+        server["tmpfs"] = [
+            "/etc/stalwart:uid=2000,gid=2000,mode=0700",
+            "/var/lib/stalwart:uid=2000,gid=2000,mode=0700",
+            "/var/log/stalwart:uid=2000,gid=2000,mode=0700",
+            "/tmp:mode=1777",
+        ]
+        server["logging"] = {"driver": "none"}
+        volumes = {}
     services = {"server": server}
     if env["STALWART_POSTGRES_HOST"] == "postgres":
         server["depends_on"] = {"postgres": {"condition": "service_healthy"}}
@@ -169,6 +231,7 @@ def prepare(config_path, directory, source):
             raise SetupError("Existing files have no deployment state; refusing to replace them.")
         state = {"config_hash": fingerprint, "source": str(source), "environment": env,
                  "request_tls_certificate": config.get("STALWART_REQUEST_TLS_CERTIFICATE", True),
+                 "stateless": config.get("STALWART_STATELESS", False),
                  "setup_password": secrets.token_hex(24)}
         private_write(state_path, state)
     write_env(directory, state)
@@ -243,7 +306,9 @@ def bootstrap(directory, url="http://127.0.0.1:8080"):
     env = state["environment"]
     patch = {"defaultDomain": env["STALWART_DOMAIN"], "serverHostname": env["STALWART_HOSTNAME"],
              "requestTlsCertificate": state["request_tls_certificate"], "generateDkimKeys": True}
-    # The fork supplies PostgreSQL/R2 defaults and environment secret references.
+    if state.get("stateless"):
+        patch["tracer"] = {"@type": "Stdout", "enable": True, "ansi": False}
+    # The fork supplies PostgreSQL/R2 and optional relay defaults from the environment.
     response = client.call("x:Bootstrap/set", dict(arguments, update={object_id: patch}))
     admin = response.get("updated", {}).get(object_id)
     if not isinstance(admin, dict) or not admin.get("username") or not admin.get("secret"):
@@ -288,6 +353,12 @@ def show(directory):
                        ("OAuth token endpoint", "oauth_token_url"), ("API authentication", "authentication")]:
         print(f"{label}: {credentials[key]}")
     print("Credentials file: " + str(directory / "credentials.json"))
+    state = read_json(directory / "deployment.json")
+    relay = state["environment"].get("STALWART_SMTP_RELAY_HOST")
+    print("Outbound mail: " + (relay if relay else "direct MX delivery (default)"))
+    if state.get("stateless"):
+        print("Server container: read-only; temporary files in RAM; persistent mail data in PostgreSQL/R2.")
+        print("Deployment configuration and administrator credentials remain in this installer directory.")
     print("HTTPS certificate: automatic ACME issuance requires the domain's DNS to point to this server.")
 
 

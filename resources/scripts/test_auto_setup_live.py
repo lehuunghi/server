@@ -1,7 +1,7 @@
-"""Exercise the actual server after the disposable PostgreSQL/S3 store tests.
+"""Verify remote storage, deleted local config, administrator/API and optional relay.
 
-Run as root in an isolated CI runner: the server's normal listeners use ports
-25/443, and the default tracer writes /var/log/stalwart. No real R2 keys needed.
+Run as root in an isolated CI runner: normal listeners use ports 25/443.
+PostgreSQL and the S3-compatible fixture are disposable, not production services.
 """
 
 import argparse
@@ -15,33 +15,33 @@ import tempfile
 import auto_setup as setup
 
 
-def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--binary", type=Path, required=True)
-    args = parser.parse_args()
-    binary = args.binary.resolve()
-    if os.getuid() != 0:
-        parser.error("Run on an isolated CI host as root (normal server ports and log path).")
-    # Separate empty database: the store suite must never be reset by bootstrap.
+def exercise(binary, with_relay):
+    database = "auto_bootstrap_relay" if with_relay else "auto_bootstrap"
     subprocess.run(["docker", "exec", "stalwart-test-postgres", "psql", "-U", "stalwart", "-d", "stalwart",
-                    "-v", "ON_ERROR_STOP=1", "-c", "CREATE DATABASE auto_bootstrap;"], check=True)
+                    "-v", "ON_ERROR_STOP=1", "-c", "CREATE DATABASE " + database + ";"], check=True)
     with tempfile.TemporaryDirectory(prefix="stalwart-bootstrap-live-") as temporary:
         directory = Path(temporary)
         config_path = directory / "input.json"
-        config_path.write_text(json.dumps({
+        config = {
             "STALWART_DOMAIN": "example.test", "STALWART_HOSTNAME": "mail.example.test",
-            "STALWART_POSTGRES_HOST": "127.0.0.1", "STALWART_POSTGRES_DATABASE": "auto_bootstrap",
+            "STALWART_POSTGRES_HOST": "127.0.0.1", "STALWART_POSTGRES_DATABASE": database,
             "STALWART_POSTGRES_USER": "stalwart", "STALWART_POSTGRES_PASSWORD": "stalwart",
             "STALWART_R2_ENDPOINT": "https://s3.example.test", "STALWART_R2_BUCKET": "stalwart",
             "STALWART_R2_ACCESS_KEY_ID": "minioadmin", "STALWART_R2_SECRET_ACCESS_KEY": "minioadmin",
-            "STALWART_REQUEST_TLS_CERTIFICATE": False,
-        }))
-        setup.prepare(config_path, directory, Path(__file__).resolve().parents[2])
+            "STALWART_REQUEST_TLS_CERTIFICATE": False, "STALWART_STATELESS": True,
+        }
+        if with_relay:
+            config.update(STALWART_SMTP_RELAY_HOST="127.0.0.1", STALWART_SMTP_RELAY_PORT="2526",
+                          STALWART_SMTP_RELAY_USER="relay-user", STALWART_SMTP_RELAY_PASSWORD="disposable-relay-secret",
+                          STALWART_SMTP_RELAY_TLS="starttls")
+        config_path.write_text(json.dumps(config))
+        source = Path(__file__).resolve().parents[2]
+        setup.prepare(config_path, directory, source)
         state = setup.read_json(directory / "deployment.json")
-        # Only this test fixture uses HTTP MinIO; production validation requires HTTPS R2.
-        env = dict(os.environ, **state["environment"])
+        # Production validation requires HTTPS; only this fixture uses HTTP MinIO.
+        env = dict(os.environ, **setup.runtime_environment(state, False))
         env["STALWART_R2_ENDPOINT"] = "http://127.0.0.1:9000"
-        env["STALWART_RECOVERY_ADMIN"] = "setup:" + state["setup_password"]
+        env.pop("STALWART_DATA_STORE", None)
         config_file = directory / "config.json"
         process = None
         log_path = directory / "server.log"
@@ -56,23 +56,50 @@ def main():
                 process.send_signal(signal.SIGTERM)
                 process.wait(timeout=30)
                 process = None
+                # Simulate a new container losing every local Stalwart config file.
+                config_file.unlink()
                 env.pop("STALWART_RECOVERY_ADMIN")
+                state_after = setup.read_json(directory / "deployment.json")
+                env.update(setup.runtime_environment(state_after, True))
+                env["STALWART_R2_ENDPOINT"] = "http://127.0.0.1:9000"
                 process = subprocess.Popen([str(binary), "--config", str(config_file)], env=env, stdout=log, stderr=log)
                 setup.verify(directory)
+                assert not config_file.exists(), "Environment startup must not recreate a local config file"
                 credentials = setup.read_json(directory / "credentials.json")
                 assert credentials["status"] == "ready"
                 assert credentials["api_url"] == "https://mail.example.test/jmap/"
                 assert "STALWART_RECOVERY_ADMIN" not in (directory / ".env").read_text()
-                # Idempotent rerun retains the same generated administrator.
-                setup.prepare(config_path, directory, Path(__file__).resolve().parents[2])
+                client = setup.Client("https://127.0.0.1:443", credentials["username"], credentials["password"])
+                arguments = setup.account_arguments(client.session())
+                routes = client.call("x:MtaRoute/get", arguments)["list"]
+                names = {route["name"] for route in routes}
+                assert {"mx", "local"} <= names
+                assert ("installation-relay" in names) == with_relay
+                strategy = client.call("x:MtaOutboundStrategy/get", arguments)["list"][0]
+                if with_relay:
+                    relay = next(route for route in routes if route["name"] == "installation-relay")
+                    assert relay["address"] == "127.0.0.1" and relay["port"] == 2526
+                    assert not relay["allowInvalidCerts"] and not relay["implicitTls"]
+                    assert strategy["route"]["else"] == "'installation-relay'"
+                    assert strategy["route"]["match"][0]["then"] == "'local'"
+                    tls = client.call("x:MtaTlsStrategy/get", arguments)["list"]
+                    tls = next(value for value in tls if value["name"] == "installation-relay-tls")
+                    assert tls["startTls"] == "Require"
+                tracer = client.call("x:Tracer/get", arguments)["list"][0]
+                assert tracer["@type"] == "Stdout"
+                # Reruns preserve credentials and the remote startup descriptor.
+                setup.prepare(config_path, directory, source)
                 setup.bootstrap(directory)
                 assert setup.read_json(directory / "credentials.json")["password"] == credentials["password"]
-            print("Live PostgreSQL/S3 bootstrap, restart, administrator login and JMAP API passed.")
+                assert "STALWART_DATA_STORE" in (directory / ".env").read_text()
+            print("Remote PostgreSQL/S3 startup without local config and " +
+                  ("SMTP relay configuration" if with_relay else "default MX routing") + " passed.")
         except Exception:
-            # Redact both temporary and real generated passwords before CI output.
             log_text = log_path.read_text()
-            for secret in [state["setup_password"], setup.read_json(directory / "credentials.json").get("password", "")
-                           if (directory / "credentials.json").exists() else ""]:
+            secrets = [state["setup_password"], config.get("STALWART_SMTP_RELAY_PASSWORD", "")]
+            if (directory / "credentials.json").exists():
+                secrets.append(setup.read_json(directory / "credentials.json").get("password", ""))
+            for secret in secrets:
                 if secret:
                     log_text = log_text.replace(secret, "[redacted]")
             print(log_text[-12000:])
@@ -85,6 +112,16 @@ def main():
                 except subprocess.TimeoutExpired:
                     process.kill()
                     process.wait(timeout=10)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--binary", type=Path, required=True)
+    args = parser.parse_args()
+    if os.getuid() != 0:
+        parser.error("Run on an isolated CI host as root.")
+    for with_relay in [False, True]:
+        exercise(args.binary.resolve(), with_relay)
 
 
 if __name__ == "__main__":

@@ -69,6 +69,14 @@ impl RegistryStoreInner {
     }
 
     pub(crate) async fn read_data_store(&self) -> RegistryInit {
+        match std::env::var("STALWART_DATA_STORE") {
+            Ok(contents) => return parse_remote_data_store(&contents),
+            Err(std::env::VarError::NotUnicode(_)) => {
+                return RegistryInit::Err("STALWART_DATA_STORE must be UTF-8 JSON".to_string());
+            }
+            Err(std::env::VarError::NotPresent) => {}
+        }
+
         match tokio::fs::read_to_string(&self.local_path).await {
             Ok(contents) => match serde_json::from_str::<DataStore>(&contents) {
                 Ok(data_store) => RegistryInit::Ok(data_store),
@@ -90,6 +98,12 @@ impl RegistryStoreInner {
 
 impl RegistryStore {
     pub async fn write_data_store(&self, data_store: &DataStore) -> trc::Result<()> {
+        if std::env::var_os("STALWART_DATA_STORE").is_some() {
+            return Err(trc::EventType::Registry(trc::RegistryEvent::LocalWriteError)
+                .into_err()
+                .caused_by(trc::location!())
+                .details("Data store configuration is managed by STALWART_DATA_STORE; update the environment and restart."));
+        }
         let json_text = serde_json::to_string(data_store).map_err(|err| {
             trc::EventType::Registry(trc::RegistryEvent::LocalWriteError)
                 .into_err()
@@ -104,5 +118,38 @@ impl RegistryStore {
                     .caused_by(trc::location!())
                     .reason(err)
             })
+    }
+}
+
+fn parse_remote_data_store(contents: &str) -> RegistryInit {
+    match serde_json::from_str::<DataStore>(contents) {
+        Ok(data_store @ DataStore::PostgreSql(_)) => RegistryInit::Ok(data_store),
+        Ok(_) => RegistryInit::Err("STALWART_DATA_STORE requires PostgreSql remote storage".to_string()),
+        Err(_) => RegistryInit::Err("STALWART_DATA_STORE contains invalid data store JSON".to_string()),
+    }
+}
+
+#[cfg(test)]
+mod bootstrap_defaults_tests {
+    use super::*;
+
+    #[test]
+    fn environment_descriptor_restores_postgres_without_a_local_file() {
+        let json = r#"{"@type":"PostgreSql","host":"db.example.test","port":6432,"database":"mail","authUsername":"mail","authSecret":{"@type":"EnvironmentVariable","variableName":"STALWART_POSTGRES_PASSWORD"},"useTls":true}"#;
+        match parse_remote_data_store(json) {
+            RegistryInit::Ok(DataStore::PostgreSql(pg)) => {
+                assert_eq!(pg.host, "db.example.test");
+                assert_eq!(pg.port, 6432);
+                assert!(pg.use_tls);
+            }
+            _ => panic!("Expected PostgreSQL"),
+        }
+    }
+
+    #[test]
+    fn invalid_or_local_descriptors_do_not_enter_bootstrap_mode() {
+        for json in ["", "{", r#"{"@type":"RocksDb","path":"/tmp/local"}"#] {
+            assert!(matches!(parse_remote_data_store(json), RegistryInit::Err(_)));
+        }
     }
 }

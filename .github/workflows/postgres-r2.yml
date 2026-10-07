@@ -61,7 +61,7 @@ jobs:
       - name: Check default server build
         run: cargo check -p stalwart
       - name: Check initial storage defaults and environment overrides
-        run: cargo test -p stalwart -p jmap bootstrap_defaults_tests -- --nocapture
+        run: cargo test -p stalwart -p jmap -p store bootstrap_defaults_tests -- --nocapture
       - name: Test PostgreSQL and S3 storage against disposable containers
         env:
           STORE: PostgreSql
@@ -71,7 +71,7 @@ jobs:
       - name: Build server for unattended bootstrap verification
         id: live-build
         if: ${{ !cancelled() }}
-        run: cargo build -p stalwart
+        run: cargo build -p stalwart --profile test
       - name: Verify unattended setup against the running server
         if: ${{ !cancelled() && steps.live-build.outcome == 'success' }}
         run: sudo -E python3 resources/scripts/test_auto_setup_live.py --binary "$PWD/target/debug/stalwart"

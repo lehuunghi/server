@@ -22,13 +22,15 @@ use rand::{RngExt, distr::Alphanumeric, rng};
 use registry::{
     jmap::{IntoValue, JmapValue, JsonPointerPatch, RegistryJsonPatch},
     schema::{
-        enums::{AcmeChallengeType, DnsRecordType},
+        enums::{AcmeChallengeType, DnsRecordType, MtaIpStrategy, MtaProtocol, MtaRequiredOrOptional},
         prelude::{Object, Property},
         structs::{
             Account, AcmeProvider, BlobStore, Bootstrap, CertificateManagement,
             CertificateManagementProperties, Credential, DataStore, Directory, DirectoryBootstrap,
             DkimManagement, DkimManagementProperties, DnsManagement, DnsManagementProperties,
-            DnsServer, DnsServerBootstrap, Domain, InMemoryStore, PasswordCredential,
+            DnsServer, DnsServerBootstrap, Domain, Expression, ExpressionMatch, InMemoryStore,
+            MtaOutboundStrategy, MtaRoute, MtaRouteCommon, MtaRouteMx, MtaRouteRelay,
+            MtaTlsStrategy, PasswordCredential,
             PostgreSqlStore, PublicStringOptional, S3Store, S3StoreCustomRegion, S3StoreRegion,
             SearchStore, SecretKeyEnvironmentVariable, SecretKeyOptional, SystemSettings, Task,
             TaskDnsManagement, TaskDomainManagement, TaskStatus, Tracer, TracerLog, UserAccount,
@@ -158,6 +160,17 @@ pub(crate) async fn bootstrap_set(
             );
             break;
         }
+
+        let relay_objects = match build_default_relay(|name| std::env::var(name).ok()) {
+            Ok(objects) => objects,
+            Err(err) => {
+                set.response.not_updated.append(
+                    id,
+                    SetError::invalid_properties().with_description(format!("SMTP relay: {err}")),
+                );
+                break;
+            }
+        };
 
         // Build store
         let store = match Store::build(bootstrap.data_store.clone()).await {
@@ -334,6 +347,15 @@ pub(crate) async fn bootstrap_set(
                     set.response
                         .not_updated
                         .append(id, err.with_property(property));
+                    break 'outer;
+                }
+            }
+        }
+
+        if let Some(objects) = relay_objects {
+            for object in objects {
+                if let Err(err) = write_object(&registry, &object).await {
+                    set.response.not_updated.append(id, err);
                     break 'outer;
                 }
             }
@@ -731,6 +753,9 @@ fn build_default_storage(env: impl Fn(&str) -> Option<String>) -> (DataStore, Bl
             auth_secret: SecretKeyOptional::EnvironmentVariable(credential(
                 "STALWART_POSTGRES_PASSWORD",
             )),
+            use_tls: env("STALWART_POSTGRES_TLS").is_some_and(|value| {
+                value == "1" || value.eq_ignore_ascii_case("true")
+            }),
             ..Default::default()
         }),
         BlobStore::S3(S3Store {
@@ -748,6 +773,103 @@ fn build_default_storage(env: impl Fn(&str) -> Option<String>) -> (DataStore, Bl
             ..Default::default()
         }),
     )
+}
+
+
+fn build_default_relay(env: impl Fn(&str) -> Option<String>) -> Result<Option<Vec<Object>>, String> {
+    let value = |name: &str| env(name).unwrap_or_default().trim().to_string();
+    let host = value("STALWART_SMTP_RELAY_HOST");
+    let username = value("STALWART_SMTP_RELAY_USER");
+    let has_password = env("STALWART_SMTP_RELAY_PASSWORD").is_some_and(|s| !s.is_empty());
+    if host.is_empty() {
+        if !username.is_empty() || has_password {
+            return Err("Relay credentials require a relay host".to_string());
+        }
+        return Ok(None);
+    }
+    if host.parse::<std::net::IpAddr>().is_err()
+        && !host.split('.').all(|part| {
+            !part.is_empty()
+                && part.len() <= 63
+                && !part.starts_with('-')
+                && !part.ends_with('-')
+                && part.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+        })
+    {
+        return Err("Relay host must be a hostname or IP address".to_string());
+    }
+    let mode = value("STALWART_SMTP_RELAY_TLS").to_ascii_lowercase();
+    let implicit_tls = match mode.as_str() {
+        "" | "starttls" => false,
+        "implicit" => true,
+        _ => return Err("Relay TLS mode must be starttls or implicit".to_string()),
+    };
+    let port = value("STALWART_SMTP_RELAY_PORT");
+    let port = if port.is_empty() {
+        if implicit_tls { 465 } else { 587 }
+    } else {
+        port.parse::<u16>()
+            .ok()
+            .filter(|port| *port > 0)
+            .ok_or_else(|| "Relay port must be between 1 and 65535".to_string())?
+    };
+    if !username.is_empty() != has_password {
+        return Err("Provide both relay username and password, or neither".to_string());
+    }
+    let auth_secret = if has_password {
+        SecretKeyOptional::EnvironmentVariable(SecretKeyEnvironmentVariable {
+            variable_name: "STALWART_SMTP_RELAY_PASSWORD".to_string(),
+        })
+    } else {
+        SecretKeyOptional::None
+    };
+    Ok(Some(vec![
+        MtaRoute::Mx(MtaRouteMx {
+            name: "mx".to_string(),
+            ip_lookup_strategy: MtaIpStrategy::V4ThenV6,
+            max_multihomed: 2,
+            max_mx_hosts: 2,
+            ..Default::default()
+        }).into(),
+        MtaRoute::Local(MtaRouteCommon { name: "local".to_string(), ..Default::default() }).into(),
+        MtaRoute::Relay(MtaRouteRelay {
+            name: "installation-relay".to_string(),
+            address: host,
+            port: u64::from(port),
+            protocol: MtaProtocol::Smtp,
+            implicit_tls,
+            allow_invalid_certs: false,
+            auth_username: (!username.is_empty()).then_some(username),
+            auth_secret,
+            ..Default::default()
+        }).into(),
+        MtaTlsStrategy {
+            name: "installation-relay-tls".to_string(),
+            allow_invalid_certs: false,
+            dane: MtaRequiredOrOptional::Disable,
+            mta_sts: MtaRequiredOrOptional::Disable,
+            start_tls: if implicit_tls {
+                MtaRequiredOrOptional::Disable
+            } else {
+                MtaRequiredOrOptional::Require
+            },
+            ..Default::default()
+        }.into(),
+        MtaOutboundStrategy {
+            route: Expression {
+                match_: List::from_iter([ExpressionMatch {
+                    if_: "is_local_domain(rcpt_domain)".to_string(),
+                    then: "'local'".to_string(),
+                }]),
+                else_: "'installation-relay'".to_string(),
+            },
+            tls: Expression {
+                else_: "'installation-relay-tls'".to_string(),
+                ..Default::default()
+            },
+            ..Default::default()
+        }.into(),
+    ]))
 }
 
 fn build_default_bootstrap(server: &Server) -> Bootstrap {
@@ -885,4 +1007,61 @@ mod bootstrap_defaults_tests {
         let (data, _) = stores(&[("STALWART_POSTGRES_PORT", "invalid")]);
         assert!(matches!(data, DataStore::PostgreSql(data) if data.port == 0));
     }
+    fn relay(vars: &[(&str, &str)]) -> Result<Option<Vec<Object>>, String> {
+        build_default_relay(|name| {
+            vars.iter().find(|(key, _)| *key == name).map(|(_, value)| value.to_string())
+        })
+    }
+
+    #[test]
+    fn empty_relay_keeps_default_mx_delivery() {
+        assert!(relay(&[]).unwrap().is_none());
+        assert!(relay(&[("STALWART_SMTP_RELAY_HOST", "")]).unwrap().is_none());
+    }
+
+    #[test]
+    fn relay_preserves_local_delivery_and_requires_verified_tls() {
+        let objects = relay(&[
+            ("STALWART_SMTP_RELAY_HOST", "smtp.example.test"),
+            ("STALWART_SMTP_RELAY_USER", "sender"),
+            ("STALWART_SMTP_RELAY_PASSWORD", "secret-must-stay-in-env"),
+        ]).unwrap().unwrap();
+        let json = serde_json::to_value(MtaRoute::from(objects[2].clone())).unwrap();
+        assert_eq!(json["port"], 587);
+        assert_eq!(json["implicitTls"], false);
+        assert_eq!(json["allowInvalidCerts"], false);
+        assert_eq!(json["authSecret"]["variableName"], "STALWART_SMTP_RELAY_PASSWORD");
+        assert!(!json.to_string().contains("secret-must-stay-in-env"));
+        let strategy = MtaOutboundStrategy::from(objects[4].clone());
+        assert_eq!(strategy.route.match_.iter().next().unwrap().then, "'local'");
+        assert_eq!(strategy.route.else_, "'installation-relay'");
+        let tls = MtaTlsStrategy::from(objects[3].clone());
+        assert_eq!(tls.start_tls, MtaRequiredOrOptional::Require);
+        let implicit = relay(&[
+            ("STALWART_SMTP_RELAY_HOST", "smtp.example.test"),
+            ("STALWART_SMTP_RELAY_TLS", "implicit"),
+        ]).unwrap().unwrap();
+        let json = serde_json::to_value(MtaRoute::from(implicit[2].clone())).unwrap();
+        assert_eq!(json["port"], 465);
+        assert_eq!(json["implicitTls"], true);
+    }
+
+    #[test]
+    fn invalid_relay_credentials_port_and_tls_are_rejected() {
+        for vars in [
+            vec![("STALWART_SMTP_RELAY_HOST", "smtp.example.test"), ("STALWART_SMTP_RELAY_PORT", "0")],
+            vec![("STALWART_SMTP_RELAY_HOST", "smtp.example.test"), ("STALWART_SMTP_RELAY_USER", "sender")],
+            vec![("STALWART_SMTP_RELAY_HOST", "smtp.example.test"), ("STALWART_SMTP_RELAY_TLS", "none")],
+            vec![("STALWART_SMTP_RELAY_PASSWORD", "secret")],
+        ] {
+            assert!(relay(&vars).is_err());
+        }
+    }
+
+    #[test]
+    fn external_postgres_can_enable_tls() {
+        let (data, _) = stores(&[("STALWART_POSTGRES_TLS", "true")]);
+        assert!(matches!(data, DataStore::PostgreSql(data) if data.use_tls));
+    }
+
 }

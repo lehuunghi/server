@@ -14,15 +14,22 @@ Lưu bản mẫu sau thành `/root/stalwart.json`, điền domain, host/IP, port
 {
   "STALWART_DOMAIN": "example.com",
   "STALWART_HOSTNAME": "mail.example.com",
+  "STALWART_STATELESS": true,
   "STALWART_POSTGRES_HOST": "YOUR_POSTGRES_HOST",
   "STALWART_POSTGRES_PORT": "5432",
   "STALWART_POSTGRES_DATABASE": "stalwart",
   "STALWART_POSTGRES_USER": "stalwart",
   "STALWART_POSTGRES_PASSWORD": "YOUR_POSTGRES_PASSWORD",
+  "STALWART_POSTGRES_TLS": false,
   "STALWART_R2_ACCOUNT_ID": "YOUR_CLOUDFLARE_ACCOUNT_ID",
   "STALWART_R2_BUCKET": "YOUR_R2_BUCKET",
   "STALWART_R2_ACCESS_KEY_ID": "YOUR_R2_ACCESS_KEY_ID",
   "STALWART_R2_SECRET_ACCESS_KEY": "YOUR_R2_SECRET_ACCESS_KEY",
+  "STALWART_SMTP_RELAY_HOST": "",
+  "STALWART_SMTP_RELAY_PORT": "",
+  "STALWART_SMTP_RELAY_USER": "",
+  "STALWART_SMTP_RELAY_PASSWORD": "",
+  "STALWART_SMTP_RELAY_TLS": "starttls",
   "STALWART_REQUEST_TLS_CERTIFICATE": true
 }
 ```
@@ -65,7 +72,38 @@ Các tùy chọn:
 
 **DNS vẫn cần thuộc quyền quản lý của bạn:** trỏ bản ghi A/AAAA của hostname về VPS, đặt MX cho domain và các bản ghi mail theo trang quản trị. Script không tự thay DNS Cloudflare vì R2 S3 credentials không có quyền DNS. ACME cần DNS đúng và cổng HTTPS 443 truy cập được; chứng chỉ hợp lệ có thể được cấp sau khi hoàn tất cài đặt. Cổng bootstrap 8080 chỉ công bố trên loopback; quản trị từ xa dùng HTTPS 443. Script kiểm tra dịch vụ HTTPS tại loopback với chứng chỉ khởi tạo, không coi việc đó là xác minh chứng chỉ công khai.
 
-Lần build đầu có thể mất nhiều phút và cần đủ RAM/dung lượng cho Rust/RocksDB; script không phụ thuộc việc fork đã có release. PostgreSQL ngoài giữ dữ liệu trên server database của bạn; cấu hình và dữ liệu local của server mail nằm trong Docker volumes, có restart policy `unless-stopped`. Các cổng 25/443/465/587/143/993/4190 cần chưa bị dịch vụ khác chiếm.
+Lần build đầu có thể mất nhiều phút và cần đủ RAM/dung lượng cho Rust/RocksDB; script không phụ thuộc việc fork đã có release. PostgreSQL ngoài giữ dữ liệu trên server database của bạn. File mẫu bật chế độ stateless, dùng tmpfs cho file tạm của container và restart policy `unless-stopped`; nếu tắt stateless, cấu hình/file local của Stalwart dùng Docker volumes. Các cổng 25/443/465/587/143/993/4190 cần chưa bị dịch vụ khác chiếm.
+
+## Chạy với dữ liệu remote và SMTP relay tùy chọn
+
+File mẫu mới bật `STALWART_STATELESS: true` và dùng PostgreSQL ngoài/R2. Container server có filesystem read-only; `/etc/stalwart`, `/var/lib/stalwart`, `/var/log/stalwart` và `/tmp` được mount tmpfs. Không tạo volume dữ liệu/cấu hình của Stalwart, không tạo PostgreSQL nội bộ và tắt log lưu trên đĩa của Docker. Tracer của Stalwart dùng stdout; trace/metrics được lưu bằng backend mặc định PostgreSQL.
+
+| Dữ liệu | Nơi lưu |
+|---|---|
+| Tài khoản, mailbox, chỉ mục, hàng đợi, cấu hình nghiệp vụ, DKIM/khóa hệ thống | PostgreSQL |
+| Nội dung thư, tệp đính kèm và blob | Cloudflare R2 |
+| File tạm, cache và file khởi tạo trong container | RAM/tmpfs |
+| Thông tin triển khai, kết nối và mật khẩu quản trị do installer tạo | File riêng trên máy chạy installer |
+
+**Không đồng nghĩa VPS không chứa bất cứ thông tin nào.** Installer vẫn giữ file đầu vào, `.env`, `deployment.json` và `credentials.json` để chạy lại và tự khởi động container. Code/image, tiến trình, thông tin kết nối trong môi trường và RAM vẫn tồn tại trên máy chạy. Nếu cần cả cấu hình/secret không lưu trên đĩa VPS, hãy giữ chúng ở hệ thống quản lý triển khai/secret bên ngoài và cấp môi trường mỗi lần chạy; không dùng thư mục installer làm kho lưu trữ lâu dài. Tmpfs không đảm bảo dữ liệu không đi vào swap của hệ điều hành.
+
+Sau bootstrap, installer cấp `STALWART_DATA_STORE` là JSON kết nối PostgreSQL chứa **tham chiếu** password môi trường. Container mới đọc registry từ PostgreSQL mà không cần file `config.json` của container cũ. Biến này chỉ chấp nhận PostgreSQL; cấu hình sai làm startup thất bại, không tự mở wizard/database local. Khi dùng biến này, thay kết nối database qua cấu hình triển khai và restart, không qua `x:DataStore/set`.
+
+Bật `STALWART_POSTGRES_TLS: true` nếu PostgreSQL ngoài yêu cầu TLS; xác minh chứng chỉ vẫn bật. Database/bucket phải truy cập được từ container. Chế độ stateless trong file mẫu áp dụng cho cài mới; installer từ chối đổi JSON của deployment có sẵn để tránh tự thay storage/mật khẩu.
+
+### SMTP relay
+
+Các trường relay có sẵn trong cùng file JSON và mặc định để trống host. Khi host trống, Stalwart giữ gửi trực tiếp theo MX của người nhận. Khi điền host, thư gửi ra ngoài đi qua relay; thư cho domain nội bộ vẫn được giao nội bộ. Relay được lưu vào registry PostgreSQL trong bootstrap, password là tham chiếu biến môi trường.
+
+| Trường | Cách điền |
+|---|---|
+| `STALWART_SMTP_RELAY_HOST` | Host/IP của relay; để trống để gửi MX mặc định |
+| `STALWART_SMTP_RELAY_PORT` | Để trống: 587 với STARTTLS hoặc 465 với TLS implicit |
+| `STALWART_SMTP_RELAY_USER` | User xác thực; có thể để trống nếu relay không yêu cầu auth |
+| `STALWART_SMTP_RELAY_PASSWORD` | Điền cùng user; để cả hai trống nếu không auth |
+| `STALWART_SMTP_RELAY_TLS` | `starttls` hoặc `implicit`; chứng chỉ được xác minh |
+
+STARTTLS được yêu cầu khi chọn `starttls`. Relay không được thử gửi thư trong lúc cài; bước bootstrap kiểm tra cấu hình và lưu chính sách gửi, không xác minh tài khoản relay với nhà cung cấp. Cần gửi một thư thử qua relay thật sau cài.
 
 ## Thông tin cần chuẩn bị
 
@@ -153,10 +191,10 @@ Có thể thay nguồn tải bằng `STALWART_DOWNLOAD_BASE_URL`. Nguồn tải 
 python3 resources/scripts/test_install.py
 python3 resources/scripts/test_auto_setup.py
 cargo check -p stalwart
-cargo test -p stalwart -p jmap bootstrap_defaults_tests -- --nocapture
+cargo test -p stalwart -p jmap -p store bootstrap_defaults_tests -- --nocapture
 STORE=PostgreSql BLOB_STORE=S3 cargo test -p tests --features "postgres s3" store:: -- --nocapture --test-threads=1
 ```
 
-Workflow `PostgreSQL and R2 defaults` chạy các kiểm tra này khi push lên main, kiểm tra parser Compose cho cấu hình sinh tự động, và kiểm tra bootstrap/restart/đăng nhập/API với binary server thật. Integration tests dùng PostgreSQL và MinIO trong container dùng riêng; MinIO được build từ một commit upstream cố định, không dùng image Docker Hub `latest` đã ngừng phân phối. Chạy store tests tuần tự để tránh hai test tạo cùng bảng PostgreSQL. Không dùng bucket R2 thật. Cần kiểm tra thêm gửi/đọc thư có tệp đính kèm và khởi động lại server với PostgreSQL/R2 thực tế trước khi đưa hệ thống vào sử dụng.
+Workflow `PostgreSQL and R2 defaults` chạy các kiểm tra này khi push lên main, kiểm tra parser Compose cho cấu hình sinh tự động, và kiểm tra bootstrap/restart/đăng nhập/API với binary server thật, xóa file local để thử khởi động từ PostgreSQL, đồng thời kiểm tra routing mặc định và relay có điền sẵn. Integration tests dùng PostgreSQL và MinIO trong container dùng riêng; MinIO được build từ một commit upstream cố định, không dùng image Docker Hub `latest` đã ngừng phân phối. Chạy store tests tuần tự để tránh hai test tạo cùng bảng PostgreSQL. Không dùng bucket R2 thật. Cần kiểm tra thêm gửi/đọc thư có tệp đính kèm và khởi động lại server với PostgreSQL/R2 thực tế trước khi đưa hệ thống vào sử dụng.
 
 Ở phiên bản này, `config.json` local chứa DataStore, còn blob/search nằm trong registry. Không chép toàn bộ Bootstrap hoặc cấu hình TOML của bản cũ vào file này.
