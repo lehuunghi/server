@@ -7,6 +7,13 @@ RUN cargo chef prepare --recipe-path /recipe.json
 
 FROM --platform=$BUILDPLATFORM chef AS builder
 ARG TARGETPLATFORM
+# Avoid the large monolithic LTO link that exhausts native ARM64/VPS memory.
+ARG CARGO_BUILD_JOBS=2
+ARG CARGO_PROFILE_RELEASE_LTO=thin
+ARG CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16
+ENV CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS} \
+    CARGO_PROFILE_RELEASE_LTO=${CARGO_PROFILE_RELEASE_LTO} \
+    CARGO_PROFILE_RELEASE_CODEGEN_UNITS=${CARGO_PROFILE_RELEASE_CODEGEN_UNITS}
 RUN case "${TARGETPLATFORM}" in \
     "linux/arm64") echo "aarch64-unknown-linux-gnu" > /target.txt && echo "-C linker=aarch64-linux-gnu-gcc" > /flags.txt ;; \
     "linux/amd64") echo "x86_64-unknown-linux-gnu" > /target.txt && echo "-C linker=x86_64-linux-gnu-gcc" > /flags.txt ;; \

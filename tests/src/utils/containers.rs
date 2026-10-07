@@ -120,7 +120,8 @@ async fn fdbcli(container: &ContainerAsync<GenericImage>, command: &str) -> Stri
 pub async fn ensure_postgres() {
     POSTGRES
         .get_or_init(|| async {
-            GenericImage::new("postgres", "16-alpine")
+            // Search fixtures expect the en_US collation, not Alpine's C locale.
+            GenericImage::new("postgres", "16-bookworm")
                 .with_wait_for(WaitFor::message_on_stderr(
                     "database system is ready to accept connections",
                 ))
@@ -130,6 +131,7 @@ pub async fn ensure_postgres() {
                 .with_env_var("POSTGRES_USER", "stalwart")
                 .with_env_var("POSTGRES_PASSWORD", "stalwart")
                 .with_env_var("POSTGRES_DB", "stalwart")
+                .with_env_var("POSTGRES_INITDB_ARGS", "--locale=en_US.utf8")
                 .with_mapped_port(5432, 5432.tcp())
                 .with_startup_timeout(READY_TIMEOUT)
                 .with_container_name("stalwart-test-postgres")

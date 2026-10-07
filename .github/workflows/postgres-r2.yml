@@ -7,6 +7,7 @@ on:
       - "crates/**"
       - "tests/**"
       - "Cargo.*"
+      - "Dockerfile"
       - "install.sh"
       - "install-auto.sh"
       - "resources/scripts/**"
@@ -55,6 +56,8 @@ jobs:
           sudo apt-get install -y libclang-dev
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: "true"
       - name: Check default server build
         run: cargo check -p stalwart
       - name: Check initial storage defaults and environment overrides
@@ -66,6 +69,9 @@ jobs:
         run: |
           cargo test -p tests --features "postgres s3" store:: -- --nocapture --test-threads=1
       - name: Build server for unattended bootstrap verification
+        id: live-build
+        if: ${{ !cancelled() }}
         run: cargo build -p stalwart
       - name: Verify unattended setup against the running server
+        if: ${{ !cancelled() && steps.live-build.outcome == 'success' }}
         run: sudo -E python3 resources/scripts/test_auto_setup_live.py --binary "$PWD/target/debug/stalwart"
