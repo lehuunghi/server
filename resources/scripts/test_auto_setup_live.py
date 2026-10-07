@@ -75,8 +75,10 @@ def exercise(binary, with_relay):
                 names = {route["name"] for route in routes}
                 assert {"mx", "local"} <= names
                 assert ("installation-relay" in names) == with_relay
-                strategy = client.call("x:MtaOutboundStrategy/get", arguments)["list"][0]
                 if with_relay:
+                    strategies = client.call("x:MtaOutboundStrategy/get", arguments)["list"]
+                    assert len(strategies) == 1, strategies
+                    strategy = strategies[0]
                     relay = next(route for route in routes if route["name"] == "installation-relay")
                     assert relay["address"] == "127.0.0.1" and relay["port"] == 2526
                     assert not relay["allowInvalidCerts"] and not relay["implicitTls"]
