@@ -48,6 +48,9 @@ def exercise(binary, with_relay):
         try:
             with log_path.open("w") as log:
                 process = subprocess.Popen([str(binary), "--config", str(config_file)], env=env, stdout=log, stderr=log)
+                initial_client = setup.Client("http://127.0.0.1:8080", "setup", state["setup_password"])
+                initial_arguments = setup.account_arguments(initial_client.session())
+                singleton_id = initial_client.call("x:Bootstrap/get", initial_arguments)["list"][0]["id"]
                 setup.bootstrap(directory)
                 credentials = setup.read_json(directory / "credentials.json")
                 assert credentials["username"] == "admin@example.test"
@@ -75,10 +78,10 @@ def exercise(binary, with_relay):
                 names = {route["name"] for route in routes}
                 assert {"mx", "local"} <= names
                 assert ("installation-relay" in names) == with_relay
+                strategies = client.call("x:MtaOutboundStrategy/get", dict(arguments, ids=[singleton_id]))["list"]
+                assert len(strategies) == 1, strategies
+                strategy = strategies[0]
                 if with_relay:
-                    strategies = client.call("x:MtaOutboundStrategy/get", arguments)["list"]
-                    assert len(strategies) == 1, strategies
-                    strategy = strategies[0]
                     relay = next(route for route in routes if route["name"] == "installation-relay")
                     assert relay["address"] == "127.0.0.1" and relay["port"] == 2526
                     assert not relay["allowInvalidCerts"] and not relay["implicitTls"]
@@ -87,6 +90,8 @@ def exercise(binary, with_relay):
                     tls = client.call("x:MtaTlsStrategy/get", arguments)["list"]
                     tls = next(value for value in tls if value["name"] == "installation-relay-tls")
                     assert tls["startTls"] == "require"
+                assert not any("registry.build-warning" in line and "MtaOutboundStrategy" in line
+                               for line in log_path.read_text().splitlines()), "Outbound strategy failed to compile"
                 tracer = client.call("x:Tracer/get", arguments)["list"][0]
                 assert tracer["@type"] == "Stdout"
                 # Reruns preserve credentials and the remote startup descriptor.
